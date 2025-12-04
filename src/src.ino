@@ -4,13 +4,13 @@
 #define DIR_PIN 3
 #define ENA_PIN 4
 #define BUT_PIN 6
+#define POT_PIN A0
 
 #define MICRO_STEP 1
 #define STEP_REV 200
 #define GEAR_RATIO 5.18
 
 const int STEPS_PER_REV = STEP_REV * MICRO_STEP * GEAR_RATIO;
-const int STEP_INTERVAL = 300;
 
 void setup() {
   pinMode(STEP_PIN, OUTPUT);
@@ -24,7 +24,12 @@ void setup() {
 
 void loop() {
 
+  unsigned long POT_VALUE = analogRead(POT_PIN); // 0-1023
+  unsigned long stepsPerSec = map(POT_VALUE, 0, 1023, 50, 5000);
+  unsigned long STEP_INTERVAL = 1000000UL / stepsPerSec;
+
   if (digitalRead(BUT_PIN) == HIGH) {
+    
     digitalWrite(ENA_PIN, LOW);
     digitalWrite(STEP_PIN, HIGH);
     delayMicroseconds(STEP_INTERVAL);
