@@ -41,6 +41,13 @@ void setup() {
 
 void loop() {
 
+  // Docile steppers for leveling
+  if (false) {
+    while (1==1) {
+      digitalWrite(ENA_PIN,LOW);
+    }
+  }
+  
   buttonState = digitalRead(BUT_PIN);
   potValue = analogRead(POT_PIN);
 
