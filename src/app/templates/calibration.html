@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Calibration | Tensile Tester{% endblock %}
+{% block content %}
+<section class="split-layout narrow">
+  <div class="surface">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Load Cell</p>
+        <h1>Calibration</h1>
+      </div>
+      <div class="state-pill">{{ snapshot.state }}</div>
+    </div>
+    <p class="body-copy">Linear calibration is persisted globally. Per-run tare remains temporary and is applied from the dashboard while IDLE.</p>
+    <form
+      class="form-grid"
+      hx-post="/api/calibration"
+      hx-target="#calibration-feedback"
+      hx-swap="innerHTML"
+    >
+      <label>
+        <span>Slope</span>
+        <input type="number" step="0.000000001" name="slope" value="{{ calibration.slope }}" required>
+      </label>
+      <label>
+        <span>Intercept</span>
+        <input type="number" step="0.000000001" name="intercept" value="{{ calibration.intercept }}" required>
+      </label>
+      <button type="submit" class="primary">Save Calibration</button>
+    </form>
+    <div id="calibration-feedback" class="feedback-slot"></div>
+  </div>
+  <div class="surface">
+    <div class="section-heading compact">
+      <div>
+        <p class="eyebrow">Model</p>
+        <h2>Force Equation</h2>
+      </div>
+    </div>
+    <pre class="equation">force_N = slope * raw_adc + intercept - tare_offset</pre>
+    <dl class="definition-list">
+      <div><dt>Stored</dt><dd>Slope, intercept</dd></div>
+      <div><dt>Temporary</dt><dd>Run-local tare offset</dd></div>
+      <div><dt>Telemetry</dt><dd>Raw ADC and calibrated Newtons</dd></div>
+    </dl>
+  </div>
+</section>
+{% endblock %}
+

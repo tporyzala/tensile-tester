@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Tensile Tester{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <div>
+        <div class="brand-title">Tensile Tester</div>
+        <div class="brand-subtitle">Personal machine MVP</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/dashboard" class="{% if request.url.path == '/dashboard' %}active{% endif %}">Dashboard / Run Test</a>
+      <a href="/methods" class="{% if request.url.path == '/methods' %}active{% endif %}">Test Methods</a>
+      <a href="/results" class="{% if request.url.path == '/results' %}active{% endif %}">Results</a>
+      <a href="/calibration" class="{% if request.url.path == '/calibration' %}active{% endif %}">Calibration</a>
+      <a href="/admin" class="{% if request.url.path == '/admin' %}active{% endif %}">Admin Settings</a>
+    </nav>
+  </header>
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
+

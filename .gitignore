@@ -1,3 +1,8 @@
 analysis/
 ece/*
 ~$*
+__pycache__/
+*.py[cod]
+src/.venv/
+src/tensile_tester.sqlite3
+src/uvicorn.*.log

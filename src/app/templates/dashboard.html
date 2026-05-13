@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Dashboard / Run Test | Tensile Tester{% endblock %}
+{% block content %}
+<section class="dashboard-grid">
+  <div class="surface live-status">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Machine</p>
+        <h1>Run Test</h1>
+      </div>
+      <div id="machine-state" class="state-pill">{{ snapshot.state }}</div>
+    </div>
+    <dl class="telemetry-strip">
+      <div>
+        <dt>Actual force</dt>
+        <dd><span id="force-value">{{ "%.2f"|format(snapshot.force_n) }}</span> N</dd>
+      </div>
+      <div>
+        <dt>Target force</dt>
+        <dd><span id="target-value">{{ "%.2f"|format(snapshot.target_force_n) }}</span> N</dd>
+      </div>
+      <div>
+        <dt>Step rate</dt>
+        <dd><span id="step-rate-value">{{ "%.1f"|format(snapshot.step_rate_steps_s) }}</span> steps/s</dd>
+      </div>
+      <div>
+        <dt>Estimated crosshead</dt>
+        <dd><span id="displacement-value">{{ "%.3f"|format(snapshot.estimated_crosshead_mm) }}</span> mm</dd>
+      </div>
+    </dl>
+    <div id="force-plot" class="plot-panel" aria-label="Live force plot"></div>
+    <div class="message-line">
+      <span class="message-label">Controller</span>
+      <span id="controller-message">{{ snapshot.last_message }}</span>
+    </div>
+  </div>
+
+  <div class="surface workflow-panel">
+    <div class="section-heading compact">
+      <div>
+        <p class="eyebrow">Workflow</p>
+        <h2>Run Sequence</h2>
+      </div>
+    </div>
+    <form id="arm-form" class="form-stack">
+      <ol class="workflow-steps">
+        <li>
+          <label>
+            <span>1. Test method</span>
+            <select name="method_id" required>
+              <option value="">Select a method</option>
+              {% for method in methods %}
+              <option value="{{ method.id }}">{{ method.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </li>
+        <li>
+          <div class="workflow-field-grid">
+            <label>
+              <span>2. Sample name</span>
+              <input type="text" name="sample_name" maxlength="160" required placeholder="Coupon A1">
+            </label>
+            <label>
+              <span>Notes</span>
+              <textarea name="notes" rows="3" maxlength="4000" placeholder="Material, orientation, setup note"></textarea>
+            </label>
+          </div>
+        </li>
+        <li>
+          <div class="workflow-command-row">
+            <button type="button" id="zero-load-button" data-action="/api/machine/zero">3. Zero Load</button>
+            <button type="submit" id="arm-run-button" class="primary">4. Arm Run</button>
+          </div>
+        </li>
+      </ol>
+    </form>
+    <div id="run-form-feedback" class="feedback-slot"></div>
+    <section id="run-action-section" class="run-action-section" hidden>
+      <div class="subsection-title">Current Machine Actions</div>
+      <div id="state-actions" class="control-grid"></div>
+    </section>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  window.TENSILE_DASHBOARD = {
+    telemetryWindowPoints: 600
+  };
+</script>
+<script src="/static/js/dashboard.js"></script>
+{% endblock %}
