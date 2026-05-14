@@ -6,3 +6,5 @@ __pycache__/
 src/.venv/
 src/tensile_tester.sqlite3
 src/uvicorn.*.log
+src/firmware/arduino_uno/.pio/
+.pytest_cache/
