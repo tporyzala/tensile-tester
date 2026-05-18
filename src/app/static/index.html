@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tensile Tester</title>
-  <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260518-tare-click">
+  <script src="/static/app.js?v=20260518-tare-click" defer></script>
 </head>
 <body>
   <main>
@@ -16,9 +16,12 @@
     <section class="panel" aria-label="Live machine telemetry">
       <div class="force">
         <div class="label">Force</div>
-        <div>
-          <span id="force" class="force-value">--</span>
-          <span class="unit">N</span>
+        <div class="force-row">
+          <div class="force-reading">
+            <span id="force" class="force-value">--</span>
+            <span class="unit">N</span>
+          </div>
+          <button id="tare-button" class="tare-button" type="button" title="Zero the current load reading">Tare</button>
         </div>
       </div>
       <div class="grid">

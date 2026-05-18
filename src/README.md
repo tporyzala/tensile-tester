@@ -45,6 +45,7 @@ Raspberry Pi Python app:
 Browser:
   polls web API -> displays force/position/state
   sends slider changes -> Python -> Arduino SET_MOTION
+  sends tare click -> Python -> Arduino ZERO_LOAD
 ```
 
 The Arduino owns the real-time hardware work. It reads the HX711, reads the jog buttons, ramps the stepper speed, and sends `TEL` telemetry lines.
@@ -163,6 +164,7 @@ http://<raspberry-pi-ip>:8000
 The page shows:
 
 - force in newtons
+- tare button to zero the displayed force at the current load
 - controller state
 - raw HX711 ADC count
 - estimated position
@@ -173,6 +175,8 @@ The page shows:
 - raw serial telemetry sent to and from the Arduino
 
 Slider changes are sent when the slider edit is committed. They are not treated as confirmed just because the Pi sent a serial line. The web API waits for the Arduino to reply with `ACK,SET_MOTION,<speed>,<acceleration>`, retries up to three times if the command is not acknowledged or the Arduino reports a partial/unknown command token, and returns an error if no matching acknowledgement arrives.
+
+The tare button posts to `/api/tare`. The Python app sends `ZERO_LOAD`, waits for `ACK,ZERO_LOAD`, then the Arduino treats the averaged current load-cell force as the new zero point for future telemetry. The firmware collects 10 HX711-ready readings without blocking the main loop, so serial handling, button reads, and stepper updates continue while tare is in progress.
 
 Optional environment variables:
 
@@ -201,6 +205,12 @@ The Arduino applies `SET_MOTION` immediately, clamps values to firmware bounds, 
 
 ```text
 ACK,SET_MOTION,<applied_jog_speed_steps_s>,<applied_acceleration_steps_s2>
+```
+
+The Arduino applies `ZERO_LOAD` after averaging 10 HX711-ready readings and replies:
+
+```text
+ACK,ZERO_LOAD
 ```
 
 Arduino telemetry:

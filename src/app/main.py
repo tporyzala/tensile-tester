@@ -30,6 +30,9 @@ MOTION_ACCELERATION_DEFAULT = 4000.0
 MOTION_ACK_TIMEOUT_S = 2.0
 MOTION_COMMAND_ATTEMPTS = 3
 MOTION_RETRY_DELAY_S = 0.1
+TARE_ACK_TIMEOUT_S = 4.0
+TARE_COMMAND_ATTEMPTS = 3
+TARE_RETRY_DELAY_S = 0.1
 
 
 @dataclass(slots=True)
@@ -72,7 +75,15 @@ class MachinePayload:
     acceleration_steps_s2: float | None
 
 
-class MotionCommandError(RuntimeError):
+class MachineCommandError(RuntimeError):
+    pass
+
+
+class MotionCommandError(MachineCommandError):
+    pass
+
+
+class TareCommandError(MachineCommandError):
     pass
 
 
@@ -108,11 +119,14 @@ class SerialMonitor:
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._write_lock = asyncio.Lock()
+        self._command_lock = asyncio.Lock()
         self._motion_lock = asyncio.Lock()
         self._motion_pending_until = 0.0
         self._motion_expected: tuple[float, float] | None = None
         self._motion_ack_future: asyncio.Future[tuple[float,
                                                       float]] | None = None
+        self._tare_pending_until = 0.0
+        self._tare_ack_future: asyncio.Future[None] | None = None
 
     async def start(self) -> None:
         self._stopped.clear()
@@ -146,7 +160,7 @@ class SerialMonitor:
             await asyncio.to_thread(write_and_flush)
 
     async def set_motion_settings(self, speed_steps_s: float, acceleration_steps_s2: float) -> tuple[float, float]:
-        async with self._motion_lock:
+        async with self._command_lock, self._motion_lock:
             # Treat each speed/acceleration update as a transaction that must be acknowledged.
             self.snapshot.jog_speed_steps_s = speed_steps_s
             self.snapshot.acceleration_steps_s2 = acceleration_steps_s2
@@ -162,6 +176,19 @@ class SerialMonitor:
                     "Arduino is disconnected; motion settings were not delivered.")
 
             return await self._send_motion_with_retries(speed_steps_s, acceleration_steps_s2)
+
+    async def tare_load(self) -> None:
+        async with self._command_lock:
+            # The Arduino owns the tare so future telemetry is truly zeroed at the controller.
+            self.snapshot.last_message = "Sending tare command."
+            self._tare_pending_until = time.monotonic() + TARE_ACK_TIMEOUT_S + 1.0
+            if self._serial is None:
+                self._log_serial(
+                    "SYS", "Not sent: ZERO_LOAD; Arduino is disconnected.")
+                raise TareCommandError(
+                    "Arduino is disconnected; tare command was not delivered.")
+
+            await self._send_tare_with_retries()
 
     async def _send_motion_with_retries(
         self,
@@ -213,6 +240,48 @@ class SerialMonitor:
         if self._motion_ack_future is ack_future:
             self._motion_ack_future = None
             self._motion_expected = None
+
+    async def _send_tare_with_retries(self) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, TARE_COMMAND_ATTEMPTS + 1):
+            try:
+                await self._send_tare_attempt()
+                return
+            except TimeoutError as exc:
+                last_error = exc
+                message = "Arduino did not acknowledge ZERO_LOAD before the timeout."
+            except TareCommandError as exc:
+                last_error = exc
+                message = str(exc)
+
+            if attempt < TARE_COMMAND_ATTEMPTS:
+                retry_message = (
+                    f"{message} Retrying ZERO_LOAD "
+                    f"({attempt + 1}/{TARE_COMMAND_ATTEMPTS})."
+                )
+                self.snapshot.last_message = retry_message
+                self._log_serial("SYS", retry_message)
+                await asyncio.sleep(TARE_RETRY_DELAY_S)
+
+        final_message = f"Arduino did not confirm ZERO_LOAD after {TARE_COMMAND_ATTEMPTS} attempts."
+        self.snapshot.last_message = final_message
+        self._log_serial("SYS", final_message)
+        raise TareCommandError(final_message) from last_error
+
+    async def _send_tare_attempt(self) -> None:
+        loop = asyncio.get_running_loop()
+        ack_future: asyncio.Future[None] = loop.create_future()
+        # The future is completed when the serial reader sees ACK,ZERO_LOAD.
+        self._tare_ack_future = ack_future
+        try:
+            await self.send("ZERO_LOAD")
+            await asyncio.wait_for(ack_future, timeout=TARE_ACK_TIMEOUT_S)
+        finally:
+            self._clear_tare_ack_state(ack_future)
+
+    def _clear_tare_ack_state(self, ack_future: asyncio.Future[None]) -> None:
+        if self._tare_ack_future is ack_future:
+            self._tare_ack_future = None
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
@@ -333,22 +402,36 @@ class SerialMonitor:
                 )
             except ValueError:
                 self.snapshot.last_message = ",".join(parts)
+        elif command == "ZERO_LOAD":
+            self._tare_pending_until = 0.0
+            self.snapshot.force_n = 0.0
+            self.snapshot.last_message = "Load reading tared."
+            self._complete_tare_ack()
         else:
             self.snapshot.last_message = ",".join(parts)
         self.snapshot.updated_at = time.time()
 
     def _apply_error(self, parts: list[str]) -> None:
         message = ",".join(parts)
-        if parts[1].upper() == "UNKNOWN_COMMAND" and time.monotonic() < self._motion_pending_until:
+        motion_pending = self._motion_ack_future is not None and not self._motion_ack_future.done()
+        tare_pending = self._tare_ack_future is not None and not self._tare_ack_future.done()
+        if parts[1].upper() == "UNKNOWN_COMMAND" and (
+            time.monotonic() < self._motion_pending_until
+            or time.monotonic() < self._tare_pending_until
+        ):
             token = parts[2] if len(parts) >= 3 else ""
-            if token == "SET_MOTION":
+            if token == "SET_MOTION" and motion_pending:
                 message = "Arduino rejected SET_MOTION. Reflash the latest firmware."
+            elif token == "ZERO_LOAD" and tare_pending:
+                message = "Arduino rejected ZERO_LOAD. Reflash the latest firmware."
             elif token:
                 message = f"Arduino received an unknown or partial command token: {token}."
             else:
-                message = "Arduino received an unknown command while SET_MOTION was pending."
-        if self._motion_ack_future is not None and not self._motion_ack_future.done():
+                message = "Arduino received an unknown command while a command was pending."
+        if motion_pending:
             self._motion_ack_future.set_exception(MotionCommandError(message))
+        if tare_pending:
+            self._tare_ack_future.set_exception(TareCommandError(message))
         self.snapshot.last_message = message
         self.snapshot.updated_at = time.time()
 
@@ -393,6 +476,11 @@ class SerialMonitor:
                     f"{confirmed_speed:.0f} steps/s, {confirmed_acceleration:.0f} steps/s^2."
                 )
             )
+
+    def _complete_tare_ack(self) -> None:
+        if self._tare_ack_future is None or self._tare_ack_future.done():
+            return
+        self._tare_ack_future.set_result(None)
 
 
 config = AppConfig()
@@ -446,6 +534,17 @@ async def set_motion(request: Request) -> JSONResponse:
     data["motion_confirmed"] = True
     data["confirmed_speed_steps_s"] = confirmed_speed
     data["confirmed_acceleration_steps_s2"] = confirmed_acceleration
+    return JSONResponse(data)
+
+
+@app.post("/api/tare")
+async def tare(request: Request) -> JSONResponse:
+    try:
+        await request.app.state.monitor.tare_load()
+    except TareCommandError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    data = request.app.state.monitor.public_snapshot()
+    data["tare_confirmed"] = True
     return JSONResponse(data)
 
 

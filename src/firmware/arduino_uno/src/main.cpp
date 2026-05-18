@@ -87,11 +87,16 @@ AccelStepper stepper(
   - rawAdc is the raw HX711 number.
   - rawForceN() converts rawAdc into force using the calibration constants.
   - tareForceN stores the force reading that should be treated as zero.
+  - manual tare commands average several HX711-ready samples before updating tareForceN.
   - measuredForceN() reports rawForceN() minus tareForceN.
 */
 long rawAdc = 0;
 bool tareSet = false;
 float tareForceN = 0.0f;
+bool tareAveraging = false;
+float tareForceSumN = 0.0f;
+uint8_t tareSamplesCollected = 0;
+uint32_t tareStartedAtMs = 0;
 
 /*
   Jog motion state:
@@ -181,6 +186,48 @@ float measuredForceN() {
   return tareSet ? (force - tareForceN) : force;
 }
 
+void beginTareAverage(uint32_t nowMs) {
+  /*
+    Start a non-blocking tare.
+
+    The loop keeps servicing serial, buttons, and step pulses while the HX711
+    produces fresh readings. Each ready reading contributes one sample, and the
+    ACK is sent only after the averaged zero has been applied.
+  */
+  tareAveraging = true;
+  tareForceSumN = 0.0f;
+  tareSamplesCollected = 0;
+  tareStartedAtMs = nowMs;
+}
+
+void completeTareAverage() {
+  if (tareSamplesCollected == 0) {
+    tareAveraging = false;
+    Serial.println(F("ERR,TARE_NO_SAMPLES"));
+    return;
+  }
+
+  tareForceN = tareForceSumN / static_cast<float>(tareSamplesCollected);
+  tareSet = true;
+  tareAveraging = false;
+  Serial.println(F("ACK,ZERO_LOAD"));
+}
+
+void failTareAverage() {
+  tareAveraging = false;
+  tareForceSumN = 0.0f;
+  tareSamplesCollected = 0;
+  Serial.println(F("ERR,TARE_TIMEOUT"));
+}
+
+void addTareSample() {
+  tareForceSumN += rawForceN();
+  ++tareSamplesCollected;
+  if (tareSamplesCollected >= HardwareConfig::LoadCell::TareSampleCount) {
+    completeTareAverage();
+  }
+}
+
 const char* motionStateName() {
   /*
     The web UI needs a human-readable state.
@@ -214,20 +261,32 @@ void setMotorEnabled(bool enabled) {
   }
 }
 
-void updateLoadCell() {
+void updateLoadCell(uint32_t nowMs) {
   /*
     Pseudo-code:
     - if the HX711 has a fresh reading, read it
+    - if a manual tare is active, add the reading to the tare average
     - on the first valid reading after startup, treat that as zero load
 
     This means the machine starts with a simple automatic tare. Later,
-    ZERO_LOAD can be sent from the Pi to tare again.
+    ZERO_LOAD can be sent from the Pi to start an averaged tare.
   */
+  if (
+      tareAveraging &&
+      (nowMs - tareStartedAtMs) >= HardwareConfig::LoadCell::TareTimeoutMs) {
+    failTareAverage();
+  }
+
   if (!loadCell.is_ready()) {
     return;
   }
 
   rawAdc = loadCell.read();
+  if (tareAveraging) {
+    addTareSample();
+    return;
+  }
+
   if (!tareSet) {
     // First valid load-cell reading becomes zero load for this power-up.
     tareForceN = rawForceN();
@@ -335,12 +394,6 @@ void applyMotionSettings(float speedStepsS, float accelerationStepsS2Value) {
   targetStepRateStepsS = static_cast<float>(jogDirection) * jogSpeedStepsS;
 }
 
-void tareNow() {
-  // Make the current load-cell force reading the new displayed zero.
-  tareForceN = rawForceN();
-  tareSet = true;
-}
-
 void emitMachinePayload(const char* stateName) {
   /*
     Send the fields that describe the machine at this instant.
@@ -435,9 +488,8 @@ void handleCommand(char* line) {
     // Pi wants a fresh one-line snapshot right now.
     emitStatus();
   } else if (strcmp(command, "ZERO_LOAD") == 0) {
-    // Operator wants the current load reading to become zero.
-    tareNow();
-    Serial.println(F("ACK,ZERO_LOAD"));
+    // Operator wants the averaged current load reading to become zero.
+    beginTareAverage(millis());
   } else if (strcmp(command, "SET_MOTION") == 0) {
     // Read the two numbers after SET_MOTION.
     char* speedToken = strtok_r(nullptr, ",", &savePtr);
@@ -540,7 +592,7 @@ void loop() {
        Check whether the Pi sent a command.
 
     2. updateLoadCell()
-       Read force if the HX711 has a fresh value.
+       Read force if the HX711 has a fresh value and advance any tare average.
 
     3. updateButtons()
        Convert physical button state into desired jog direction.
@@ -552,7 +604,7 @@ void loop() {
        Every TelemetryPeriodMs, report the current machine state to the Pi.
   */
   processSerial();
-  updateLoadCell();
+  updateLoadCell(nowMs);
   updateButtons(nowMs);
   updateStepper();
 

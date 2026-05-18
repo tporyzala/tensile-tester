@@ -44,6 +44,9 @@ constexpr uint8_t Hx711Gain = 128;
 constexpr float CalibrationSlopeNPerCount = 0.002283289f;
 constexpr float CalibrationInterceptN = 0.0f;
 constexpr bool InvertSign = false;
+// A manual tare averages this many HX711-ready readings before applying the zero.
+constexpr uint8_t TareSampleCount = 10;
+constexpr uint16_t TareTimeoutMs = 3000;
 }
 
 namespace Timing {

@@ -3,6 +3,9 @@ let motionControlsActive = false;
 let motionLocalUntil = 0;
 let lastMotionSent = "";
 let serialAutoScroll = true;
+let tareInFlight = false;
+let lastConnected = false;
+let messageHoldUntil = 0;
 
 function number(value, digits) {
   const parsed = Number(value);
@@ -13,9 +16,21 @@ function setActive(id, active) {
   $(id).classList.toggle("active", Boolean(active));
 }
 
+function setMessage(text, holdMs = 0) {
+  $("message").textContent = text || "";
+  messageHoldUntil = holdMs > 0 ? Date.now() + holdMs : 0;
+}
+
 function updateMotionLabels() {
   $("speed-value").textContent = `${Number($("speed-slider").value).toFixed(0)} steps/s`;
   $("acceleration-value").textContent = `${Number($("acceleration-slider").value).toFixed(0)} steps/s^2`;
+}
+
+function updateTareButton() {
+  const button = $("tare-button");
+  button.disabled = tareInFlight;
+  button.textContent = tareInFlight ? "Taring" : "Tare";
+  button.classList.toggle("disconnected", !lastConnected);
 }
 
 function syncMotionControls(data) {
@@ -74,11 +89,43 @@ async function sendMotionUpdate() {
       } catch (_) {
       }
       lastMotionSent = "";
-      $("message").textContent = `Motion setting error: ${detail}`;
+      setMessage(`Motion setting error: ${detail}`, 5000);
     }
   } catch (error) {
     lastMotionSent = "";
-    $("message").textContent = `Motion setting error: ${error}`;
+    setMessage(`Motion setting error: ${error}`, 5000);
+  }
+}
+
+async function tareLoad() {
+  if (tareInFlight) {
+    return;
+  }
+
+  tareInFlight = true;
+  updateTareButton();
+  setMessage(lastConnected
+    ? "Taring load reading."
+    : "Trying tare; Arduino is not connected in the latest snapshot.");
+  try {
+    const response = await fetch("/api/tare", { method: "POST" });
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const data = await response.json();
+        detail = data.detail || detail;
+      } catch (_) {
+      }
+      setMessage(`Tare error: ${detail}`, 5000);
+      return;
+    }
+    const data = await response.json();
+    updatePage(data);
+  } catch (error) {
+    setMessage(`Tare error: ${error}`, 5000);
+  } finally {
+    tareInFlight = false;
+    updateTareButton();
   }
 }
 
@@ -98,10 +145,12 @@ function updateSerialLog(rawSerialLines) {
 }
 
 function updateConnection(connected) {
+  lastConnected = Boolean(connected);
   const connection = $("connection");
-  connection.textContent = connected ? "Connected" : "Disconnected";
-  connection.classList.toggle("connected", Boolean(connected));
-  connection.classList.toggle("disconnected", !connected);
+  connection.textContent = lastConnected ? "Connected" : "Disconnected";
+  connection.classList.toggle("connected", lastConnected);
+  connection.classList.toggle("disconnected", !lastConnected);
+  updateTareButton();
 }
 
 function updatePage(data) {
@@ -110,7 +159,11 @@ function updatePage(data) {
   $("raw").textContent = String(data.raw_adc ?? "--");
   $("position").textContent = `${number(data.position_mm, 3)} mm`;
   $("step-rate").textContent = `${number(data.step_rate_steps_s, 0)} steps/s`;
-  $("message").textContent = data.last_message || "";
+  if (data.tare_confirmed) {
+    setMessage(data.last_message || "Load reading tared.", 3000);
+  } else if (!tareInFlight && Date.now() >= messageHoldUntil) {
+    setMessage(data.last_message || "");
+  }
   syncMotionControls(data);
   updateSerialLog(data.raw_serial);
   updateConnection(data.connected);
@@ -126,7 +179,7 @@ async function refresh() {
     updatePage(data);
   } catch (error) {
     updateConnection(false);
-    $("message").textContent = `Web app error: ${error}`;
+    setMessage(`Web app error: ${error}`, 5000);
   }
 }
 
@@ -149,6 +202,9 @@ $("serial-log").addEventListener("scroll", () => {
     serialLog.scrollHeight - serialLog.scrollTop - serialLog.clientHeight < 12;
 });
 
+$("tare-button").addEventListener("click", tareLoad);
+
 updateMotionLabels();
+updateTareButton();
 refresh();
 window.setInterval(refresh, 250);
