@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tensile Tester Test</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260601-plotly-size">
+  <script src="/static/vendor/plotly-basic-3.5.1.min.js" defer></script>
+  <script src="/static/live-charts.js?v=20260601-simplify" defer></script>
+  <script src="/static/test.js?v=20260601-simplify" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="mode-sidebar" aria-label="Mode navigation">
+      <div class="sidebar-title">Tensile Tester</div>
+      <nav class="sidebar-tabs" role="tablist" aria-label="Workspace">
+        <button id="run-tab" class="mode-button tab-button active" data-tab="run" type="button" role="tab" aria-selected="true" aria-controls="run-panel">Automated Test</button>
+        <button id="setup-tab" class="mode-button tab-button" data-tab="setup" type="button" role="tab" aria-selected="false" aria-controls="setup-panel">Setup</button>
+      </nav>
+    </aside>
+
+    <main class="page-content">
+      <div class="topbar">
+        <h1>Automated Test</h1>
+        <div id="connection" class="chip disconnected">Disconnected</div>
+      </div>
+
+      <div id="run-panel" class="tab-panel active" role="tabpanel" aria-labelledby="run-tab">
+        <div class="run-dashboard">
+          <section class="panel charts-panel" aria-label="Live force plots">
+            <div class="section-heading">
+              <h2>Live Plots</h2>
+              <button id="clear-plots-button" class="action-button" type="button">Clear</button>
+            </div>
+            <div class="chart-grid">
+              <div class="chart-cell">
+                <div class="chart-header">
+                  <div class="label">Force vs Time</div>
+                </div>
+                <div id="force-time-chart" class="live-chart"></div>
+              </div>
+              <div class="chart-cell">
+                <div class="chart-header">
+                  <div class="label">Force vs Displacement</div>
+                </div>
+                <div id="force-displacement-chart" class="live-chart"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel machine-panel" aria-label="Machine status and controls">
+            <div class="machine-readouts">
+              <div class="live-readout">
+                <div class="label">Force</div>
+                <div id="force" class="live-readout-value">--</div>
+              </div>
+              <div class="live-readout">
+                <div class="label">Position</div>
+                <div id="position" class="live-readout-value">--</div>
+              </div>
+              <div class="live-readout">
+                <div class="label">Step Rate</div>
+                <div id="step-rate" class="live-readout-value">--</div>
+              </div>
+            </div>
+
+            <div class="status-list">
+              <div class="status-row">
+                <span class="label">Frame</span>
+                <strong id="frame-mode">--</strong>
+              </div>
+              <div class="status-row">
+                <span class="label">Phase</span>
+                <strong id="phase">--</strong>
+              </div>
+              <div class="status-row">
+                <span class="label">Step</span>
+                <strong id="step">--</strong>
+              </div>
+              <div class="status-row">
+                <span class="label">Control</span>
+                <strong id="control-mode">--</strong>
+              </div>
+              <div class="status-row">
+                <span class="label">Command</span>
+                <strong id="command-value">--</strong>
+              </div>
+            </div>
+
+            <div class="return-zero-controls" aria-label="Return to zero">
+              <label class="field-control">
+                <span class="label">Return</span>
+                <select id="return-zero-mode" class="table-input">
+                  <option value="LOAD">Load</option>
+                  <option value="DISPLACEMENT" selected>Displacement</option>
+                </select>
+              </label>
+              <label class="field-control">
+                <span id="return-zero-rate-label" class="label">Rate (mm/s)</span>
+                <input id="return-zero-rate" class="table-input" type="number" min="0.0001" max="0.1562" step="0.0001" value="0.1562">
+              </label>
+              <button id="return-zero-button" class="action-button" type="button">Return to Zero</button>
+            </div>
+
+            <div class="test-actions">
+              <button id="start-button" class="action-button primary" type="button">Start</button>
+              <button id="tare-button" class="action-button" type="button">Tare</button>
+              <button id="zero-displacement-button" class="action-button" type="button">Zero Displacement</button>
+              <button id="pause-button" class="action-button" type="button">Pause</button>
+              <button id="stop-button" class="action-button warning" type="button">Stop</button>
+            </div>
+            <div id="message" class="message">No automated test running.</div>
+          </section>
+        </div>
+
+        <section class="panel steps-panel" aria-label="Test steps">
+          <div class="section-heading">
+            <h2>Steps</h2>
+            <button id="add-step-button" class="action-button" type="button">Add Step</button>
+          </div>
+          <div class="table-wrap">
+            <table class="step-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Target Type</th>
+                  <th>Target</th>
+                  <th>Rate Type</th>
+                  <th>Rate</th>
+                  <th>Hold (s)</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="step-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel sample-set-panel page-wide" aria-label="Sample set">
+          <div class="section-heading sample-set-heading">
+            <h2>Sample Set</h2>
+            <div class="sample-set-actions">
+              <label class="toggle-control">
+                <input id="overlay-toggle" type="checkbox">
+                <span>Overlay Samples</span>
+              </label>
+              <a class="action-button" href="/api/test/samples/csv">Set XLSX</a>
+              <button id="clear-samples-button" class="action-button danger" type="button">Clear Set</button>
+            </div>
+          </div>
+          <div class="sample-run-controls" aria-label="Sample setup">
+            <label class="field-control">
+              <span class="label">Sample ID</span>
+              <input id="sample-id" class="table-input" type="text" maxlength="64">
+            </label>
+            <label class="field-control field-control-wide">
+              <span class="label">Notes</span>
+              <input id="sample-notes" class="table-input" type="text" maxlength="200">
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="sample-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>ID</th>
+                  <th>Status</th>
+                  <th>Points</th>
+                  <th>Peak Force</th>
+                  <th>Final Disp.</th>
+                  <th>Include</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody id="sample-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <details class="panel serial-panel page-wide" aria-label="Recent raw serial">
+          <summary class="serial-summary">
+            <span class="label">Recent Raw Serial</span>
+          </summary>
+          <textarea id="serial-log" class="serial-log" readonly spellcheck="false"></textarea>
+        </details>
+      </div>
+
+      <div id="setup-panel" class="tab-panel" role="tabpanel" aria-labelledby="setup-tab" hidden>
+        <section class="panel setup-panel" aria-label="Tester settings">
+          <div class="section-heading">
+            <h2>Tester Setup</h2>
+          </div>
+          <div class="motion-controls" aria-label="Motion settings">
+            <div class="slider-control">
+              <div class="slider-heading">
+                <label class="label" for="jog-speed-slider">Jog Speed</label>
+                <div id="jog-speed-value" class="control-value">4000 steps/s</div>
+              </div>
+              <input id="jog-speed-slider" type="range" min="50" max="4000" step="50" value="4000">
+            </div>
+            <div class="slider-control">
+              <div class="slider-heading">
+                <label class="label" for="test-speed-slider">Test Max Speed</label>
+                <div id="test-speed-value" class="control-value">1200 steps/s</div>
+              </div>
+              <input id="test-speed-slider" type="range" min="50" max="4000" step="50" value="1200">
+            </div>
+            <div class="slider-control">
+              <div class="slider-heading">
+                <label class="label" for="acceleration-slider">Acceleration</label>
+                <div id="acceleration-value" class="control-value">10000 steps/s^2</div>
+              </div>
+              <input id="acceleration-slider" type="range" min="100" max="10000" step="100" value="10000">
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
