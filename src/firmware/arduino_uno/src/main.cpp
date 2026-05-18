@@ -521,7 +521,10 @@ void setup() {
   // Start reading physical inputs and the load-cell amplifier.
   upButton.begin(HardwareConfig::Pins::ButtonUp);
   downButton.begin(HardwareConfig::Pins::ButtonDown);
-  loadCell.begin(HardwareConfig::Pins::Hx711Data, HardwareConfig::Pins::Hx711Clock);
+  loadCell.begin(
+      HardwareConfig::Pins::Hx711Data,
+      HardwareConfig::Pins::Hx711Clock,
+      HardwareConfig::LoadCell::Hx711Gain);
 
   // Let the Pi know the firmware has booted and serial is alive.
   emitStatus("BOOT");

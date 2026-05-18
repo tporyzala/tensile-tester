@@ -34,12 +34,14 @@ constexpr uint32_t StepPulseHighMicros = 20;
 constexpr bool InvertDirection = false;
 constexpr bool InvertStepPulse = true;
 constexpr bool InvertEnable = false;
-constexpr bool DisableMotorWhenIdle = false;
+constexpr bool DisableMotorWhenIdle = false; // keep false to hold position when not jogging
 }
 
 namespace LoadCell {
+// HX711 channel A gain. The bogde/HX711 library defaults to 128, but keep it explicit.
+constexpr uint8_t Hx711Gain = 128;
 // Force calibration maps raw HX711 counts to newtons: force = slope * counts + intercept.
-constexpr float CalibrationSlopeNPerCount = 0.001f;
+constexpr float CalibrationSlopeNPerCount = 0.002283289f;
 constexpr float CalibrationInterceptN = 0.0f;
 constexpr bool InvertSign = false;
 }
