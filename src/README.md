@@ -163,6 +163,17 @@ bogde/HX711
 waspinator/AccelStepper
 ```
 
+PlatformIO is the firmware build/upload tool. On a clean Raspberry Pi, install it into the repo virtual environment:
+
+```bash
+cd ~/tensile-tester/src
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install platformio
+```
+
 Build firmware on the Pi:
 
 ```bash
@@ -174,6 +185,21 @@ Upload firmware:
 
 ```bash
 platformio run --target upload --upload-port /dev/ttyACM0
+```
+
+If `platformio` is not found, activate the repo virtual environment first:
+
+```bash
+cd ~/tensile-tester/src
+source .venv/bin/activate
+```
+
+If PlatformIO reports a broken JSON file under `.pio/libdeps`, clear the generated local PlatformIO cache and rebuild:
+
+```bash
+cd ~/tensile-tester/src/firmware/arduino_uno
+rm -rf .pio
+platformio run
 ```
 
 On this Windows checkout, the verified local build command is:
