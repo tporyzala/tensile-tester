@@ -1,0 +1,199 @@
+{
+  "exported_at": "2026-06-07T07:02:21.397Z",
+  "averaging_duration_s": 12,
+  "points": [
+    {
+      "reference_force_n": 0,
+      "raw_adc_mean": 3196.275,
+      "raw_adc_stddev": 83.68581744636703,
+      "raw_adc_min": 2915,
+      "raw_adc_max": 3373,
+      "sample_count": 120,
+      "duration_s": 12.008625020000181,
+      "started_at": 1780811222.5644815,
+      "finished_at": 1780811234.5729022
+    },
+    {
+      "reference_force_n": 4.81,
+      "raw_adc_mean": 6173.941666666667,
+      "raw_adc_stddev": 73.21216836853164,
+      "raw_adc_min": 5950,
+      "raw_adc_max": 6350,
+      "sample_count": 120,
+      "duration_s": 12.01284036800007,
+      "started_at": 1780811274.6035988,
+      "finished_at": 1780811286.6162457
+    },
+    {
+      "reference_force_n": 101.81,
+      "raw_adc_mean": 48711.691666666666,
+      "raw_adc_stddev": 90.75413634589266,
+      "raw_adc_min": 48503,
+      "raw_adc_max": 48961,
+      "sample_count": 120,
+      "duration_s": 12.005363960000068,
+      "started_at": 1780811413.0007782,
+      "finished_at": 1780811425.005952
+    },
+    {
+      "reference_force_n": 207.21,
+      "raw_adc_mean": 94907.80833333333,
+      "raw_adc_stddev": 73.23891222491558,
+      "raw_adc_min": 94720,
+      "raw_adc_max": 95119,
+      "sample_count": 120,
+      "duration_s": 12.012966107000011,
+      "started_at": 1780811478.186797,
+      "finished_at": 1780811490.1994512
+    },
+    {
+      "reference_force_n": 514.41,
+      "raw_adc_mean": 227469.80833333332,
+      "raw_adc_stddev": 142.1125900963349,
+      "raw_adc_min": 227121,
+      "raw_adc_max": 227745,
+      "sample_count": 120,
+      "duration_s": 12.005403210000168,
+      "started_at": 1780811536.1977384,
+      "finished_at": 1780811548.2029395
+    },
+    {
+      "reference_force_n": 1003.81,
+      "raw_adc_mean": 443503.4083333333,
+      "raw_adc_stddev": 167.6214234434913,
+      "raw_adc_min": 443181,
+      "raw_adc_max": 443873,
+      "sample_count": 120,
+      "duration_s": 12.00340673799974,
+      "started_at": 1780811695.5408967,
+      "finished_at": 1780811707.5441084
+    },
+    {
+      "reference_force_n": 1410.81,
+      "raw_adc_mean": 624314.6638655462,
+      "raw_adc_stddev": 233.6941647621545,
+      "raw_adc_min": 623877,
+      "raw_adc_max": 624837,
+      "sample_count": 119,
+      "duration_s": 12.02748611099969,
+      "started_at": 1780811846.830264,
+      "finished_at": 1780811858.8574164
+    },
+    {
+      "reference_force_n": 1969.81,
+      "raw_adc_mean": 873551.9333333333,
+      "raw_adc_stddev": 411.45886253130516,
+      "raw_adc_min": 872752,
+      "raw_adc_max": 874477,
+      "sample_count": 120,
+      "duration_s": 12.002031581999745,
+      "started_at": 1780811991.4220533,
+      "finished_at": 1780812003.4238896
+    },
+    {
+      "reference_force_n": 2504.81,
+      "raw_adc_mean": 1114094.0416666667,
+      "raw_adc_stddev": 1120.970817311445,
+      "raw_adc_min": 1112224,
+      "raw_adc_max": 1116089,
+      "sample_count": 120,
+      "duration_s": 12.003594534000513,
+      "started_at": 1780812202.6069987,
+      "finished_at": 1780812214.6103747
+    },
+    {
+      "reference_force_n": 2754.81,
+      "raw_adc_mean": 1227207.5583333333,
+      "raw_adc_stddev": 892.126960283058,
+      "raw_adc_min": 1225684,
+      "raw_adc_max": 1228968,
+      "sample_count": 120,
+      "duration_s": 12.016895182000553,
+      "started_at": 1780812463.9248142,
+      "finished_at": 1780812475.941519
+    }
+  ],
+  "fit": {
+    "slope_n_per_count": 0.0022580213853333883,
+    "intercept_n": -7.217257303406476,
+    "zero_raw_adc_mean": 3196.275,
+    "invert_sign": false,
+    "rms_error_n": 5.871558122545882,
+    "max_abs_error_n": 9.587076818493756,
+    "force_span_n": 2754.81,
+    "max_percent_span_error": 0.3480122701200357,
+    "residuals": [
+      {
+        "index": 1,
+        "reference_force_n": 0,
+        "raw_adc_mean": 3196.275,
+        "predicted_force_n": 0,
+        "residual_force_n": 0
+      },
+      {
+        "index": 2,
+        "reference_force_n": 4.81,
+        "raw_adc_mean": 6173.941666666667,
+        "predicted_force_n": 6.723635011727719,
+        "residual_force_n": 1.9136350117277194
+      },
+      {
+        "index": 3,
+        "reference_force_n": 101.81,
+        "raw_adc_mean": 48711.691666666666,
+        "predicted_force_n": 102.77478419569304,
+        "residual_force_n": 0.9647841956930421
+      },
+      {
+        "index": 4,
+        "reference_force_n": 207.21,
+        "raw_adc_mean": 94907.80833333333,
+        "predicted_force_n": 207.08660354838256,
+        "residual_force_n": -0.12339645161745239
+      },
+      {
+        "index": 5,
+        "reference_force_n": 514.41,
+        "raw_adc_mean": 227469.80833333332,
+        "predicted_force_n": 506.41443443094715,
+        "residual_force_n": -7.995565569052815
+      },
+      {
+        "index": 6,
+        "reference_force_n": 1003.81,
+        "raw_adc_mean": 443503.4083333333,
+        "predicted_force_n": 994.2229231815062,
+        "residual_force_n": -9.587076818493756
+      },
+      {
+        "index": 7,
+        "reference_force_n": 1410.81,
+        "raw_adc_mean": 624314.6638655462,
+        "predicted_force_n": 1402.4986048822227,
+        "residual_force_n": -8.311395117777238
+      },
+      {
+        "index": 8,
+        "reference_force_n": 1969.81,
+        "raw_adc_mean": 873551.9333333333,
+        "predicted_force_n": 1965.2816893625866,
+        "residual_force_n": -4.5283106374133695
+      },
+      {
+        "index": 9,
+        "reference_force_n": 2504.81,
+        "raw_adc_mean": 1114094.0416666667,
+        "predicted_force_n": 2508.430914052434,
+        "residual_force_n": 3.620914052434273
+      },
+      {
+        "index": 10,
+        "reference_force_n": 2754.81,
+        "raw_adc_mean": 1227207.5583333333,
+        "predicted_force_n": 2763.843653656032,
+        "residual_force_n": 9.03365365603213
+      }
+    ],
+    "constants_block": "constexpr float CalibrationSlopeNPerCount = 0.00225802139f;\nconstexpr float CalibrationInterceptN = -7.2172573f;\nconstexpr bool InvertSign = false;"
+  }
+}

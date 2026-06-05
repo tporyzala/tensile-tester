@@ -1,19 +1,24 @@
+import asyncio
 from io import BytesIO
 import zipfile
 import unittest
+from unittest.mock import AsyncMock, Mock
 
 from app.main import (
     AppConfig,
     RETURN_ZERO_DISPLACEMENT_DEFAULT_RATE_MM_S,
     ReturnZeroRequest,
+    RUN_KIND_RELATIVE_MOVE,
     RUN_KIND_SPECIMEN,
     SerialMonitor,
+    STEPS_PER_MM,
     TEST_SPEED_DEFAULT,
     TestRunState,
     TestSampleMetadata,
     TestSampleRecord,
     TestStep,
     parse_machine_payload,
+    parse_relative_move_offset,
     parse_return_zero_request,
     parse_sample_metadata,
 )
@@ -230,6 +235,63 @@ class MultiSampleTests(unittest.TestCase):
         )
         self.assertEqual(displacement_step.target_type, "DISPLACEMENT")
         self.assertEqual(displacement_step.hold_duration_s, 0.0)
+
+    def test_relative_move_offset_and_step(self):
+        self.assertEqual(parse_relative_move_offset({"offset_mm": 100}), 100.0)
+        self.assertEqual(parse_relative_move_offset({"offset_mm": -1}), -1.0)
+        with self.assertRaises(ValueError):
+            parse_relative_move_offset({"offset_mm": 5})
+
+        monitor = SerialMonitor(AppConfig())
+        monitor.snapshot.position_mm = 12.5
+        monitor.snapshot.test_max_step_rate_steps_s = TEST_SPEED_DEFAULT
+        relative_step = monitor._relative_move_step(-10.0)
+        self.assertEqual(relative_step.target_type, "DISPLACEMENT")
+        self.assertEqual(relative_step.target_value, 2.5)
+        self.assertEqual(relative_step.rate_type, "DISPLACEMENT")
+        self.assertEqual(
+            relative_step.rate_value_per_s,
+            TEST_SPEED_DEFAULT / STEPS_PER_MM,
+        )
+        self.assertEqual(relative_step.hold_duration_s, 0.0)
+
+    def test_relative_move_completion_and_stop_messages(self):
+        monitor = SerialMonitor(AppConfig())
+        monitor._test_run_kind = RUN_KIND_RELATIVE_MOVE
+        monitor._test_state = TestRunState(run_id=9, status="RUNNING")
+        monitor._mark_test_complete()
+        self.assertEqual(monitor._test_state.message, "Relative move complete.")
+
+        monitor._test_run_kind = RUN_KIND_RELATIVE_MOVE
+        monitor._test_state = TestRunState(run_id=10, status="RUNNING")
+        monitor._mark_test_stopped()
+        self.assertEqual(
+            monitor._test_state.message,
+            "Relative move stopped; controller returned to idle.",
+        )
+
+    def test_relative_move_starts_one_displacement_step(self):
+        monitor = SerialMonitor(AppConfig())
+        monitor._serial = object()
+        monitor.snapshot.position_mm = 2.5
+        monitor.snapshot.test_max_step_rate_steps_s = TEST_SPEED_DEFAULT
+        monitor._send_test_command_with_retries = AsyncMock()
+        monitor._send_test_step = AsyncMock()
+        monitor._ensure_test_heartbeat = Mock()
+
+        asyncio.run(monitor.move_relative(10.0))
+
+        self.assertEqual(monitor._test_run_kind, RUN_KIND_RELATIVE_MOVE)
+        self.assertEqual(monitor._test_state.status, "RUNNING")
+        self.assertEqual(monitor._test_state.message, "Moving load head +10 mm.")
+        self.assertEqual(monitor._test_steps[0].target_value, 12.5)
+        monitor._send_test_command_with_retries.assert_awaited_once_with(
+            "START_TEST,1,1",
+            "START_TEST",
+            1,
+        )
+        monitor._send_test_step.assert_awaited_once_with(1)
+        monitor._ensure_test_heartbeat.assert_called_once_with(1)
 
 
 if __name__ == "__main__":

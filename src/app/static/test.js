@@ -21,7 +21,25 @@ let plotResetId = null;
 let plotRefreshInFlight = false;
 let plotGeneration = 0;
 let lastSubmittedSampleId = "";
+let lastMachine = {};
+let calibrationPoints = [];
+let calibrationFit = null;
+let calibrationSampleInFlight = false;
+let calibrationSampleStartedAt = 0;
+let calibrationFitInFlight = false;
+const CALIBRATION_SAMPLE_DURATION_MS = 12000;
 const STEPS_PER_MM = 7681.2;
+const calibrationChartConfig = {
+  responsive: true,
+  displaylogo: false,
+  scrollZoom: true,
+  modeBarButtonsToRemove: ["select2d", "lasso2d"],
+};
+const tabTitles = {
+  run: "Automated Test",
+  calibration: "Calibration",
+  setup: "Setup",
+};
 const returnZeroRates = {
   LOAD: { value: 10, label: "Rate (N/s)", step: "0.1", max: "" },
   DISPLACEMENT: { value: 0.1562, label: "Rate (mm/s)", step: "0.0001", max: "0.1562" },
@@ -31,6 +49,12 @@ const liveCharts = new LiveForceCharts(
   "force-time-chart",
   "force-displacement-chart",
 );
+window.addEventListener("resize", () => {
+  const chart = $("calibration-fit-chart");
+  if (window.Plotly && chart?.dataset.plotlyReady === "1") {
+    window.Plotly.Plots.resize(chart);
+  }
+});
 
 function number(value, digits) {
   const parsed = Number(value);
@@ -66,6 +90,7 @@ async function requestJson(url, options = {}) {
 }
 
 function switchTab(tabName) {
+  $("page-title").textContent = tabTitles[tabName] || "Tensile Tester";
   for (const button of document.querySelectorAll(".tab-button")) {
     const active = button.dataset.tab === tabName;
     button.classList.toggle("active", active);
@@ -78,9 +103,14 @@ function switchTab(tabName) {
     panel.hidden = !active;
   }
 
-  if (tabName === "run") {
-    window.requestAnimationFrame(() => liveCharts.draw());
+  syncLiveChartVisibility();
+  if (tabName === "calibration") {
+    window.requestAnimationFrame(() => renderCalibrationChart());
   }
+}
+
+function syncLiveChartVisibility() {
+  liveCharts.setVisible(!document.hidden && !$("run-panel").hidden);
 }
 
 function renderSteps() {
@@ -168,25 +198,37 @@ function updateButtons(status) {
   const blocked = active || status === "FAULT";
   const readyForSetupActions = ["IDLE", "COMPLETE"].includes(status);
   const zeroingInFlight = tareInFlight || displacementZeroInFlight;
+  const calibrationBusy = calibrationSampleInFlight;
   const setupControlsDisabled =
-    commandInFlight || zeroingInFlight || motionInFlight || !readyForSetupActions || !lastConnected;
+    commandInFlight || zeroingInFlight || motionInFlight || calibrationBusy ||
+    !readyForSetupActions || !lastConnected;
   const samples = getCurrentSamples();
-  $("start-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
-  $("tare-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
+  $("start-button").disabled =
+    commandInFlight || motionInFlight || zeroingInFlight ||
+    calibrationBusy || !readyForSetupActions;
+  $("tare-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   $("tare-button").textContent = tareInFlight ? "Taring" : "Tare";
-  $("zero-displacement-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
+  $("zero-displacement-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   $("zero-displacement-button").textContent = displacementZeroInFlight ? "Zeroing" : "Zero Displacement";
-  $("return-zero-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
+  $("return-zero-button").disabled =
+    commandInFlight || motionInFlight || zeroingInFlight ||
+    calibrationBusy || !readyForSetupActions;
+  for (const button of document.querySelectorAll(".relative-move-button")) {
+    button.disabled =
+      commandInFlight || motionInFlight || zeroingInFlight ||
+      calibrationBusy || !readyForSetupActions || !lastConnected;
+  }
   $("pause-button").disabled = commandInFlight || !["RUNNING", "PAUSED", "WAITING_NEXT"].includes(status);
   $("pause-button").textContent = status === "PAUSED" ? "Resume" : "Pause";
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
   $("add-step-button").disabled = commandInFlight;
   $("clear-samples-button").disabled = commandInFlight || blocked || samples.length === 0;
-  $("sample-id").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
-  $("sample-notes").disabled = commandInFlight || motionInFlight || zeroingInFlight || !readyForSetupActions;
+  $("sample-id").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("sample-notes").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   for (const slider of motionSliders()) {
     slider.disabled = setupControlsDisabled;
   }
+  updateCalibrationButtons(status);
 }
 
 function getCurrentSamples() {
@@ -310,6 +352,7 @@ function updatePage(data) {
   const run = data.run || {};
   const machine = data.machine || {};
   lastStatus = run.status || "IDLE";
+  lastMachine = machine;
 
   $("frame-mode").textContent = machine.frame_mode || "--";
   $("force").textContent = `${number(machine.force_n, 2)} N`;
@@ -332,6 +375,7 @@ function updatePage(data) {
   setMessage(message || "");
   updateSerialLog(machine.raw_serial);
   updateConnection(machine.connected);
+  updateCalibrationStatus(machine, run);
   syncMotionControls(machine);
   updateButtons(lastStatus);
 }
@@ -398,6 +442,491 @@ function buildSampleSetSignature(samples) {
   return samples
     .map((sample) => `${sample.index}:${sample.included}:${sample.status}:${sample.point_count}`)
     .join("|");
+}
+
+function setCalibrationMessage(text) {
+  $("calibration-message").textContent = text || "";
+}
+
+function hasCalibrationZero() {
+  return calibrationPoints.some(
+    (point) => Math.abs(Number(point.reference_force_n)) < 1e-9,
+  );
+}
+
+function calibrationReadyForCapture(status = lastStatus) {
+  const frameMode = String(lastMachine.frame_mode || "");
+  const testPhase = String(lastMachine.test_phase || "NONE");
+  const faultReason = String(lastMachine.fault_reason || "NONE");
+  const stepRate = Math.abs(Number(lastMachine.step_rate_steps_s || 0));
+  return (
+    lastConnected &&
+    ["IDLE", "COMPLETE"].includes(status) &&
+    testPhase === "NONE" &&
+    frameMode !== "FAULT" &&
+    faultReason === "NONE" &&
+    stepRate <= 0.5 &&
+    !commandInFlight &&
+    !motionInFlight &&
+    !tareInFlight &&
+    !displacementZeroInFlight
+  );
+}
+
+function calibrationCanFit() {
+  const zeroPoint = calibrationPoints.find(
+    (point) => Math.abs(Number(point.reference_force_n)) < 1e-9,
+  );
+  if (!zeroPoint) {
+    return false;
+  }
+  const zeroRaw = Number(zeroPoint.raw_adc_mean);
+  return calibrationPoints.some((point) => (
+    Math.abs(Number(point.reference_force_n)) >= 1e-9 &&
+    Math.abs(Number(point.raw_adc_mean) - zeroRaw) > 1e-9
+  ));
+}
+
+function updateCalibrationButtons(status = lastStatus) {
+  const ready = calibrationReadyForCapture(status);
+  const zeroCaptured = hasCalibrationZero();
+  const referenceForce = Number($("calibration-reference-force").value);
+  const validLoadForce =
+    Number.isFinite(referenceForce) && Math.abs(referenceForce) >= 1e-9;
+  const elapsed = Date.now() - calibrationSampleStartedAt;
+  const remainingS = Math.max(
+    0,
+    Math.ceil((CALIBRATION_SAMPLE_DURATION_MS - elapsed) / 1000),
+  );
+  $("capture-zero-button").disabled = calibrationSampleInFlight || !ready || zeroCaptured;
+  $("capture-zero-button").textContent = calibrationSampleInFlight
+    ? `Capturing ${remainingS}s`
+    : "Capture Zero";
+  $("capture-load-button").disabled =
+    calibrationSampleInFlight || !ready || !zeroCaptured || !validLoadForce;
+  $("capture-load-button").textContent = calibrationSampleInFlight
+    ? `Capturing ${remainingS}s`
+    : "Capture Load Point";
+  $("calibration-reference-force").disabled =
+    calibrationSampleInFlight || !ready || !zeroCaptured;
+  $("fit-calibration-button").disabled =
+    calibrationSampleInFlight || calibrationFitInFlight || !calibrationCanFit();
+  $("fit-calibration-button").textContent = calibrationFitInFlight
+    ? "Fitting"
+    : "Fit Linear Calibration";
+  $("copy-calibration-button").disabled = !calibrationFit;
+  $("download-calibration-json-button").disabled = calibrationPoints.length === 0;
+  $("download-calibration-csv-button").disabled = calibrationPoints.length === 0;
+  $("reset-calibration-button").disabled =
+    calibrationSampleInFlight || calibrationPoints.length === 0;
+}
+
+function updateCalibrationStatus(machine, run) {
+  $("calibration-frame-mode").textContent = machine.frame_mode || "--";
+  $("calibration-phase").textContent = run.phase || machine.test_phase || "--";
+  $("calibration-raw-adc").textContent = Number.isFinite(Number(machine.raw_adc))
+    ? String(machine.raw_adc)
+    : "--";
+  $("calibration-step-rate").textContent = `${number(machine.step_rate_steps_s, 0)} steps/s`;
+}
+
+function renderCalibrationPoints() {
+  const body = $("calibration-point-body");
+  if (calibrationPoints.length === 0) {
+    body.innerHTML = `
+      <tr>
+        <td class="empty-table-cell" colspan="8">No calibration points captured</td>
+      </tr>
+    `;
+    renderCalibrationFit();
+    renderCalibrationChart();
+    updateCalibrationButtons(lastStatus);
+    return;
+  }
+
+  const residuals = calibrationFit?.residuals || [];
+  body.innerHTML = calibrationPoints.map((point, index) => {
+    const residual = residuals[index]?.residual_force_n;
+    return `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${optionalNumber(point.reference_force_n, 3, " N")}</td>
+        <td>${optionalNumber(point.raw_adc_mean, 2)}</td>
+        <td>${optionalNumber(point.raw_adc_stddev, 2)}</td>
+        <td>${point.sample_count || 0}</td>
+        <td>${optionalNumber(point.raw_adc_min, 0)} / ${optionalNumber(point.raw_adc_max, 0)}</td>
+        <td>${optionalNumber(residual, 4, " N")}</td>
+        <td><button class="mini-button danger" data-calibration-action="delete" data-index="${index}" type="button">Delete</button></td>
+      </tr>
+    `;
+  }).join("");
+  renderCalibrationFit();
+  renderCalibrationChart();
+  updateCalibrationButtons(lastStatus);
+}
+
+function renderCalibrationFit() {
+  if (!calibrationFit) {
+    $("calibration-slope").textContent = "--";
+    $("calibration-intercept").textContent = "--";
+    $("calibration-rms-error").textContent = "--";
+    $("calibration-max-error").textContent = "--";
+    $("calibration-constants").textContent = "--";
+    return;
+  }
+
+  $("calibration-slope").textContent =
+    `${Number(calibrationFit.slope_n_per_count).toPrecision(8)} N/count`;
+  $("calibration-intercept").textContent = `${number(calibrationFit.intercept_n, 4)} N`;
+  $("calibration-rms-error").textContent = `${number(calibrationFit.rms_error_n, 4)} N`;
+  $("calibration-max-error").textContent =
+    `${number(calibrationFit.max_abs_error_n, 4)} N (${number(calibrationFit.max_percent_span_error, 3)}%)`;
+  $("calibration-constants").textContent = calibrationFit.constants_block || "--";
+}
+
+function renderCalibrationChart() {
+  const chart = $("calibration-fit-chart");
+  const summary = $("calibration-chart-summary");
+  if (!chart) {
+    return;
+  }
+  if (!window.Plotly) {
+    chart.textContent = "Plotly failed to load";
+    return;
+  }
+
+  const pointTrace = {
+    type: "scatter",
+    mode: "markers",
+    name: "Measured points",
+    x: calibrationPoints.map((point) => point.raw_adc_mean),
+    y: calibrationPoints.map((point) => point.reference_force_n),
+    customdata: calibrationPoints.map((point, index) => [
+      index + 1,
+      point.raw_adc_stddev,
+      point.sample_count,
+    ]),
+    marker: {
+      color: "#176a8f",
+      line: { color: "#0d4f70", width: 1 },
+      size: 9,
+    },
+    hovertemplate:
+      "Point %{customdata[0]}<br>Mean raw ADC %{x:.2f}<br>Reference %{y:.4f} N<br>Std dev %{customdata[1]:.2f}<br>Samples %{customdata[2]}<extra></extra>",
+  };
+  const traces = [pointTrace];
+  const fitTrace = buildCalibrationFitLine();
+  if (fitTrace) {
+    traces.push(fitTrace);
+  }
+
+  const emptyText = calibrationPoints.length === 0
+    ? "No calibration points"
+    : "";
+  const layout = calibrationChartLayout(emptyText);
+  layout.showlegend = calibrationPoints.length > 0;
+  const plot = chart.dataset.plotlyReady === "1"
+    ? window.Plotly.react(chart, traces, layout, calibrationChartConfig)
+    : window.Plotly.newPlot(chart, traces, layout, calibrationChartConfig);
+  chart.dataset.plotlyReady = "1";
+  plot.catch(() => {
+    chart.dataset.plotlyReady = "0";
+  });
+
+  if (summary) {
+    const pointLabel = calibrationPoints.length === 1 ? "point" : "points";
+    summary.textContent = calibrationFit
+      ? `${calibrationPoints.length} ${pointLabel}, fit ready`
+      : `${calibrationPoints.length} ${pointLabel}`;
+  }
+}
+
+function buildCalibrationFitLine() {
+  if (!calibrationFit || calibrationPoints.length < 2) {
+    return null;
+  }
+  const rawValues = calibrationPoints
+    .map((point) => Number(point.raw_adc_mean))
+    .filter(Number.isFinite);
+  if (rawValues.length < 2) {
+    return null;
+  }
+  const minimum = Math.min(...rawValues);
+  const maximum = Math.max(...rawValues);
+  const span = maximum - minimum;
+  if (span <= 0) {
+    return null;
+  }
+  const padding = span * 0.06;
+  const x0 = minimum - padding;
+  const x1 = maximum + padding;
+  const slope = Number(calibrationFit.slope_n_per_count);
+  const intercept = Number(calibrationFit.intercept_n);
+  if (!Number.isFinite(slope) || !Number.isFinite(intercept)) {
+    return null;
+  }
+  return {
+    type: "scatter",
+    mode: "lines",
+    name: "Linear fit",
+    x: [x0, x1],
+    y: [
+      (slope * x0) + intercept,
+      (slope * x1) + intercept,
+    ],
+    line: { color: "#b45f06", width: 2 },
+    hovertemplate:
+      "Fit<br>Raw ADC %{x:.2f}<br>Force %{y:.4f} N<extra></extra>",
+  };
+}
+
+function calibrationChartLayout(emptyText) {
+  const layout = {
+    autosize: true,
+    showlegend: true,
+    margin: { l: 62, r: 20, t: 22, b: 52 },
+    paper_bgcolor: "#ffffff",
+    plot_bgcolor: "#ffffff",
+    font: {
+      family: "Arial, Helvetica, sans-serif",
+      size: 12,
+      color: "#172026",
+    },
+    hovermode: "closest",
+    legend: {
+      orientation: "h",
+      x: 0,
+      xanchor: "left",
+      y: 1.12,
+      yanchor: "bottom",
+      font: { size: 12 },
+      itemsizing: "constant",
+    },
+    xaxis: calibrationAxisLayout("Mean raw ADC"),
+    yaxis: calibrationAxisLayout("Reference force (N)"),
+    uirevision: "calibration-fit",
+  };
+
+  if (emptyText) {
+    layout.annotations = [{
+      text: emptyText,
+      x: 0.5,
+      y: 0.5,
+      xref: "paper",
+      yref: "paper",
+      showarrow: false,
+      font: { color: "#69757d", size: 13 },
+    }];
+  }
+
+  return layout;
+}
+
+function calibrationAxisLayout(title) {
+  return {
+    title: { text: title, standoff: 8 },
+    showline: true,
+    linecolor: "#d9e0e4",
+    linewidth: 1,
+    mirror: true,
+    gridcolor: "#eef2f4",
+    zeroline: false,
+    automargin: true,
+  };
+}
+
+async function refreshCalibrationFit({ silent = false } = {}) {
+  if (!calibrationCanFit()) {
+    calibrationFit = null;
+    renderCalibrationPoints();
+    return false;
+  }
+
+  calibrationFitInFlight = true;
+  updateCalibrationButtons(lastStatus);
+  try {
+    const { response, data } = await requestJson("/api/calibration/fit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ points: calibrationPoints }),
+    });
+    if (!response.ok) {
+      if (!silent) {
+        setCalibrationMessage(data.detail || `HTTP ${response.status}`);
+      }
+      return false;
+    }
+    calibrationFit = data;
+    renderCalibrationPoints();
+    if (!silent) {
+      setCalibrationMessage("Linear calibration fit complete.");
+    }
+    return true;
+  } catch (error) {
+    if (!silent) {
+      setCalibrationMessage(`Calibration fit error: ${error}`);
+    }
+    return false;
+  } finally {
+    calibrationFitInFlight = false;
+    updateCalibrationButtons(lastStatus);
+  }
+}
+
+async function captureCalibrationPoint(referenceForceN) {
+  calibrationSampleInFlight = true;
+  calibrationSampleStartedAt = Date.now();
+  updateButtons(lastStatus);
+  setCalibrationMessage("Capturing 12 second ADC average.");
+  try {
+    const { response, data } = await requestJson("/api/calibration/sample", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reference_force_n: referenceForceN }),
+    });
+    if (!response.ok) {
+      setCalibrationMessage(data.detail || `HTTP ${response.status}`);
+      return;
+    }
+    calibrationPoints.push(data);
+    calibrationFit = null;
+    renderCalibrationPoints();
+    await refreshCalibrationFit({ silent: true });
+    setCalibrationMessage(`Captured ${number(referenceForceN, 3)} N calibration point.`);
+  } catch (error) {
+    setCalibrationMessage(`Calibration sample error: ${error}`);
+  } finally {
+    calibrationSampleInFlight = false;
+    updateButtons(lastStatus);
+  }
+}
+
+function captureCalibrationZero() {
+  if (hasCalibrationZero()) {
+    setCalibrationMessage("Zero point already captured.");
+    return;
+  }
+  captureCalibrationPoint(0);
+}
+
+function captureCalibrationLoad() {
+  const referenceForceN = Number($("calibration-reference-force").value);
+  if (!Number.isFinite(referenceForceN) || Math.abs(referenceForceN) < 1e-9) {
+    setCalibrationMessage("Enter a non-zero reference force in N.");
+    return;
+  }
+  captureCalibrationPoint(referenceForceN);
+}
+
+async function fitCalibration() {
+  const fitUpdated = await refreshCalibrationFit({ silent: false });
+  if (!fitUpdated && !calibrationCanFit()) {
+    setCalibrationMessage("Capture zero and at least one distinct load point first.");
+  }
+}
+
+function deleteCalibrationPoint(index) {
+  calibrationPoints.splice(index, 1);
+  calibrationFit = null;
+  renderCalibrationPoints();
+  refreshCalibrationFit({ silent: true });
+  setCalibrationMessage(
+    calibrationPoints.length === 0
+      ? "No calibration points captured."
+      : "Calibration point deleted.",
+  );
+}
+
+function resetCalibrationRun() {
+  calibrationPoints = [];
+  calibrationFit = null;
+  renderCalibrationPoints();
+  setCalibrationMessage("No calibration points captured.");
+}
+
+async function copyCalibrationConstants() {
+  if (!calibrationFit?.constants_block) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(calibrationFit.constants_block);
+    setCalibrationMessage("Calibration constants copied.");
+  } catch (error) {
+    setCalibrationMessage(`Copy failed: ${error}`);
+  }
+}
+
+function calibrationExportPayload() {
+  return {
+    exported_at: new Date().toISOString(),
+    averaging_duration_s: CALIBRATION_SAMPLE_DURATION_MS / 1000,
+    points: calibrationPoints,
+    fit: calibrationFit,
+  };
+}
+
+function downloadBlob(filename, mimeType, contents) {
+  const blob = new Blob([contents], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadCalibrationJson() {
+  if (calibrationPoints.length === 0) {
+    return;
+  }
+  downloadBlob(
+    "load-cell-calibration.json",
+    "application/json",
+    `${JSON.stringify(calibrationExportPayload(), null, 2)}\n`,
+  );
+}
+
+function csvValue(value) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadCalibrationCsv() {
+  if (calibrationPoints.length === 0) {
+    return;
+  }
+  const residuals = calibrationFit?.residuals || [];
+  const rows = [[
+    "index",
+    "reference_force_n",
+    "raw_adc_mean",
+    "raw_adc_stddev",
+    "raw_adc_min",
+    "raw_adc_max",
+    "sample_count",
+    "duration_s",
+    "predicted_force_n",
+    "residual_force_n",
+  ]];
+  calibrationPoints.forEach((point, index) => {
+    const residual = residuals[index] || {};
+    rows.push([
+      index + 1,
+      point.reference_force_n,
+      point.raw_adc_mean,
+      point.raw_adc_stddev,
+      point.raw_adc_min,
+      point.raw_adc_max,
+      point.sample_count,
+      point.duration_s,
+      residual.predicted_force_n ?? "",
+      residual.residual_force_n ?? "",
+    ]);
+  });
+  const csv = rows.map((row) => row.map(csvValue).join(",")).join("\n");
+  downloadBlob("load-cell-calibration.csv", "text/csv", `${csv}\n`);
 }
 
 async function refreshOverlay() {
@@ -514,6 +1043,10 @@ async function returnToZero() {
     mode,
     rate_value_per_s: Number($("return-zero-rate").value),
   });
+}
+
+async function moveRelative(offsetMm) {
+  await postJson("/api/test/move-relative", { offset_mm: offsetMm });
 }
 
 async function pauseOrResumeTest() {
@@ -649,12 +1182,31 @@ $("return-zero-mode").addEventListener("change", updateReturnZeroRateControl);
 $("add-step-button").addEventListener("click", addStep);
 $("start-button").addEventListener("click", startTest);
 $("return-zero-button").addEventListener("click", returnToZero);
+for (const button of document.querySelectorAll(".relative-move-button")) {
+  button.addEventListener("click", () => moveRelative(Number(button.dataset.offsetMm)));
+}
 $("tare-button").addEventListener("click", tareLoad);
 $("zero-displacement-button").addEventListener("click", zeroDisplacement);
 $("clear-plots-button").addEventListener("click", clearPlots);
 $("pause-button").addEventListener("click", pauseOrResumeTest);
 $("stop-button").addEventListener("click", () => postJson("/api/test/stop"));
 $("clear-samples-button").addEventListener("click", () => postJson("/api/test/samples/clear"));
+$("capture-zero-button").addEventListener("click", captureCalibrationZero);
+$("capture-load-button").addEventListener("click", captureCalibrationLoad);
+$("fit-calibration-button").addEventListener("click", fitCalibration);
+$("copy-calibration-button").addEventListener("click", copyCalibrationConstants);
+$("download-calibration-json-button").addEventListener("click", downloadCalibrationJson);
+$("download-calibration-csv-button").addEventListener("click", downloadCalibrationCsv);
+$("reset-calibration-button").addEventListener("click", resetCalibrationRun);
+$("calibration-reference-force").addEventListener("input", () => updateCalibrationButtons(lastStatus));
+
+$("calibration-point-body").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button || button.dataset.calibrationAction !== "delete") {
+    return;
+  }
+  deleteCalibrationPoint(Number(button.dataset.index));
+});
 
 $("serial-log").addEventListener("scroll", () => {
   const serialLog = $("serial-log");
@@ -674,9 +1226,12 @@ for (const slider of motionSliders()) {
 for (const button of document.querySelectorAll(".tab-button")) {
   button.addEventListener("click", () => switchTab(button.dataset.tab));
 }
+document.addEventListener("visibilitychange", syncLiveChartVisibility);
 
 renderSteps();
+renderCalibrationPoints();
 updateMotionLabels();
 updateReturnZeroRateControl();
+syncLiveChartVisibility();
 refresh();
 window.setInterval(refresh, 250);

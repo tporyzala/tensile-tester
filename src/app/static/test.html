@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tensile Tester Test</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260601-plotly-size">
+  <link rel="stylesheet" href="/static/styles.css?v=20260607-relative-move">
   <script src="/static/vendor/plotly-basic-3.5.1.min.js" defer></script>
-  <script src="/static/live-charts.js?v=20260601-simplify" defer></script>
-  <script src="/static/test.js?v=20260601-simplify" defer></script>
+  <script src="/static/live-charts.js?v=20260607-chart-performance" defer></script>
+  <script src="/static/test.js?v=20260607-chart-performance" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -15,13 +15,14 @@
       <div class="sidebar-title">Tensile Tester</div>
       <nav class="sidebar-tabs" role="tablist" aria-label="Workspace">
         <button id="run-tab" class="mode-button tab-button active" data-tab="run" type="button" role="tab" aria-selected="true" aria-controls="run-panel">Automated Test</button>
+        <button id="calibration-tab" class="mode-button tab-button" data-tab="calibration" type="button" role="tab" aria-selected="false" aria-controls="calibration-panel">Calibration</button>
         <button id="setup-tab" class="mode-button tab-button" data-tab="setup" type="button" role="tab" aria-selected="false" aria-controls="setup-panel">Setup</button>
       </nav>
     </aside>
 
     <main class="page-content">
       <div class="topbar">
-        <h1>Automated Test</h1>
+        <h1 id="page-title">Automated Test</h1>
         <div id="connection" class="chip disconnected">Disconnected</div>
       </div>
 
@@ -100,6 +101,15 @@
                 <input id="return-zero-rate" class="table-input" type="number" min="0.0001" max="0.1562" step="0.0001" value="0.1562">
               </label>
               <button id="return-zero-button" class="action-button" type="button">Return to Zero</button>
+            </div>
+
+            <div class="relative-move-controls" aria-label="Move load head by relative displacement">
+              <button class="action-button relative-move-button" data-offset-mm="100" type="button">+100 mm</button>
+              <button class="action-button relative-move-button" data-offset-mm="10" type="button">+10 mm</button>
+              <button class="action-button relative-move-button" data-offset-mm="1" type="button">+1 mm</button>
+              <button class="action-button relative-move-button" data-offset-mm="-1" type="button">-1 mm</button>
+              <button class="action-button relative-move-button" data-offset-mm="-10" type="button">-10 mm</button>
+              <button class="action-button relative-move-button" data-offset-mm="-100" type="button">-100 mm</button>
             </div>
 
             <div class="test-actions">
@@ -183,6 +193,116 @@
           </summary>
           <textarea id="serial-log" class="serial-log" readonly spellcheck="false"></textarea>
         </details>
+      </div>
+
+      <div id="calibration-panel" class="tab-panel" role="tabpanel" aria-labelledby="calibration-tab" hidden>
+        <div class="calibration-overview-grid">
+          <section class="panel calibration-status-panel" aria-label="Calibration machine status">
+            <div class="section-heading">
+              <h2>Machine</h2>
+            </div>
+            <div class="machine-readouts calibration-readouts">
+              <div class="live-readout">
+                <div class="label">Raw ADC</div>
+                <div id="calibration-raw-adc" class="live-readout-value">--</div>
+              </div>
+              <div class="live-readout">
+                <div class="label">Step Rate</div>
+                <div id="calibration-step-rate" class="live-readout-value">--</div>
+              </div>
+            </div>
+            <div class="status-list">
+              <div class="status-row">
+                <span class="label">Frame</span>
+                <strong id="calibration-frame-mode">--</strong>
+              </div>
+              <div class="status-row">
+                <span class="label">Phase</span>
+                <strong id="calibration-phase">--</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel calibration-capture-panel" aria-label="Calibration point capture">
+            <div class="section-heading">
+              <h2>Capture Point</h2>
+              <button id="reset-calibration-button" class="action-button danger" type="button">Reset Run</button>
+            </div>
+            <div class="calibration-capture-stack">
+              <label class="field-control">
+                <span class="label">Reference Force (N)</span>
+                <input id="calibration-reference-force" class="table-input" type="number" step="0.001" value="0">
+              </label>
+              <div class="calibration-capture-controls">
+                <button id="capture-zero-button" class="action-button" type="button">Capture Zero</button>
+                <button id="capture-load-button" class="action-button primary" type="button">Capture Load Point</button>
+              </div>
+            </div>
+            <div id="calibration-message" class="message calibration-message">No calibration points captured.</div>
+          </section>
+
+          <section class="panel calibration-chart-panel" aria-label="Calibration curve">
+            <div class="section-heading">
+              <h2>Calibration Curve</h2>
+              <div id="calibration-chart-summary" class="chart-summary">No points</div>
+            </div>
+            <div id="calibration-fit-chart" class="calibration-fit-chart"></div>
+          </section>
+        </div>
+
+        <section class="panel page-wide calibration-points-panel" aria-label="Captured calibration points">
+          <div class="section-heading">
+            <h2>Points</h2>
+            <button id="fit-calibration-button" class="action-button primary" type="button">Fit Linear Calibration</button>
+          </div>
+          <div class="table-wrap">
+            <table class="calibration-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Reference</th>
+                  <th>Mean Raw ADC</th>
+                  <th>Std Dev</th>
+                  <th>Samples</th>
+                  <th>Min / Max</th>
+                  <th>Residual</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="calibration-point-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel page-wide calibration-results-panel" aria-label="Calibration fit results">
+          <div class="section-heading">
+            <h2>Results</h2>
+            <div class="calibration-actions">
+              <button id="copy-calibration-button" class="action-button" type="button">Copy Constants</button>
+              <button id="download-calibration-json-button" class="action-button" type="button">Download JSON</button>
+              <button id="download-calibration-csv-button" class="action-button" type="button">Download CSV</button>
+            </div>
+          </div>
+          <div class="calibration-results-grid">
+            <div class="metric">
+              <div class="label">Slope</div>
+              <div id="calibration-slope" class="metric-value">--</div>
+            </div>
+            <div class="metric">
+              <div class="label">Intercept</div>
+              <div id="calibration-intercept" class="metric-value">--</div>
+            </div>
+            <div class="metric">
+              <div class="label">RMS Error</div>
+              <div id="calibration-rms-error" class="metric-value">--</div>
+            </div>
+            <div class="metric">
+              <div class="label">Max Error</div>
+              <div id="calibration-max-error" class="metric-value">--</div>
+            </div>
+          </div>
+          <pre id="calibration-constants" class="constants-output">--</pre>
+        </section>
       </div>
 
       <div id="setup-panel" class="tab-panel" role="tabpanel" aria-labelledby="setup-tab" hidden>

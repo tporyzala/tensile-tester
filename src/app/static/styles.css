@@ -355,6 +355,17 @@ input[type="range"] {
   grid-column: 1 / -1;
 }
 
+.relative-move-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.relative-move-controls .action-button {
+  padding-inline: 8px;
+}
+
 .field-control {
   display: grid;
   gap: 6px;
@@ -381,6 +392,131 @@ input[type="range"] {
   grid-template-columns: minmax(160px, 220px) minmax(260px, 1fr);
   margin-top: 0;
   margin-bottom: 14px;
+}
+
+.calibration-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(250px, 300px) minmax(340px, 420px) minmax(420px, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.calibration-status-panel,
+.calibration-capture-panel,
+.calibration-chart-panel,
+.calibration-points-panel,
+.calibration-results-panel {
+  min-width: 0;
+}
+
+.calibration-status-panel,
+.calibration-capture-panel,
+.calibration-chart-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.calibration-status-panel .section-heading,
+.calibration-capture-panel .section-heading,
+.calibration-chart-panel .section-heading {
+  margin-bottom: 12px;
+}
+
+.calibration-readouts {
+  grid-template-columns: 1fr;
+}
+
+.calibration-status-panel .live-readout {
+  padding: 10px 12px;
+}
+
+.calibration-status-panel .live-readout-value {
+  font-size: 24px;
+}
+
+.calibration-capture-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.calibration-capture-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.calibration-message {
+  min-height: 20px;
+  margin-top: 12px;
+  border-top: 1px solid #e4e8eb;
+  padding-top: 10px;
+}
+
+.chart-summary {
+  color: #5d6870;
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.calibration-fit-chart {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 300px;
+  min-width: 0;
+  border: 1px solid #dce3e7;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.calibration-fit-chart .plot-container,
+.calibration-fit-chart .svg-container {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.calibration-fit-chart .modebar {
+  top: 2px !important;
+  right: 4px !important;
+}
+
+.calibration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.calibration-results-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.calibration-results-panel .metric {
+  min-height: 70px;
+  padding: 10px 12px;
+}
+
+.calibration-results-panel .metric-value {
+  font-size: 18px;
+}
+
+.constants-output {
+  min-height: 86px;
+  margin: 14px 0 0;
+  border: 1px solid #cbd3d8;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  background: #10181d;
+  color: #e8eef2;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .toggle-control {
@@ -449,7 +585,8 @@ input[type="range"] {
 }
 
 .step-table,
-.sample-table {
+.sample-table,
+.calibration-table {
   width: 100%;
   min-width: 900px;
   border-collapse: collapse;
@@ -459,18 +596,30 @@ input[type="range"] {
   min-width: 980px;
 }
 
+.calibration-table {
+  min-width: 1040px;
+}
+
 .step-table th,
 .step-table td,
 .sample-table th,
-.sample-table td {
+.sample-table td,
+.calibration-table th,
+.calibration-table td {
   border-bottom: 1px solid #e1e6e9;
   padding: 10px 8px;
   text-align: left;
   vertical-align: middle;
 }
 
+.calibration-table th,
+.calibration-table td {
+  padding: 8px 8px;
+}
+
 .step-table th,
-.sample-table th {
+.sample-table th,
+.calibration-table th {
   color: #5d6870;
   font-size: 13px;
   text-transform: uppercase;
@@ -530,6 +679,14 @@ input[type="range"] {
     grid-template-columns: 1fr;
   }
 
+  .calibration-overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-results-grid {
+    grid-template-columns: repeat(2, minmax(150px, 1fr));
+  }
+
   .charts-panel {
     min-height: 520px;
   }
@@ -587,8 +744,23 @@ input[type="range"] {
   }
 
   .sample-run-controls,
-  .return-zero-controls {
+  .return-zero-controls,
+  .calibration-capture-controls,
+  .calibration-results-grid {
     grid-template-columns: 1fr;
+  }
+
+  .relative-move-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calibration-fit-chart {
+    min-height: 260px;
+  }
+
+  .calibration-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .charts-panel {

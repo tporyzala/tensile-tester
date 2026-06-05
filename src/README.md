@@ -261,7 +261,7 @@ http://<raspberry-pi-ip>:8000/test
 
 The root URL redirects to `/test`, so there is no separate manual-mode page. The sidebar remains in place with the automated-test entry so more pages can be added later.
 
-The left sidebar switches between Automated Test and Setup. Automated Test keeps the live plots, compact machine status, test actions, method steps, sample set, and raw serial log. Setup contains tester motion sliders for physical button jog speed, automated-test maximum step rate, and shared acceleration. Slider changes post to `/api/motion`; the Python app sends `SET_MOTION_LIMITS`, waits for `ACK,SET_MOTION_LIMITS`, and only then reports the applied settings.
+The left sidebar switches between Automated Test, Calibration, and Setup. Automated Test keeps the live plots, compact machine status, test actions, method steps, sample set, and raw serial log. Calibration captures averaged raw ADC points, fits a linear load-cell calibration, and reports firmware-ready slope/intercept constants for `HardwareConfig.h`. Setup contains tester motion sliders for physical button jog speed, automated-test maximum step rate, and shared acceleration. Slider changes post to `/api/motion`; the Python app sends `SET_MOTION_LIMITS`, waits for `ACK,SET_MOTION_LIMITS`, and only then reports the applied settings.
 
 An automated test has any number of steps. Each step contains:
 
@@ -281,11 +281,13 @@ The Tare button posts to `/api/tare`. The Python app sends `ZERO_LOAD`, waits fo
 
 The Zero Displacement button posts to `/api/zero-displacement`. The Python app sends `ZERO_DISPLACEMENT` and waits for `ACK,ZERO_DISPLACEMENT`; the Arduino stores the current step count as the new displayed displacement origin without changing stepper motion tracking.
 
-The live charts are rendered with the vendored Plotly basic bundle. The Python app retains every received periodic telemetry point for the live plot buffer until the operator clicks Clear. The force-displacement chart can overlay finalized included samples, and those overlay traces use the full retained sample points rather than decimated data. The workbook export keeps full retained specimen telemetry.
+The automated-test page has fixed `+100`, `+10`, `+1`, `-1`, `-10`, and `-100 mm` relative-move buttons. A button posts its fixed offset to `/api/test/move-relative`; the Python app converts the offset to an absolute displacement target from the latest stationary position and runs one displacement step at the configured automated-test maximum step rate. Relative moves use the same stop and fault handling as Return to Zero and are not archived as specimen samples.
+
+The live charts are rendered with the vendored Plotly basic bundle. The Python app retains every received periodic telemetry point for the live plot buffer until the operator clicks Clear, while the browser incrementally renders only the most recent 5,000 live points. The force-displacement chart can overlay finalized included samples; overlay display traces are uniformly reduced to at most 2,000 points per sample and drawn without markers. Chart rendering pauses while the Automated Test tab or browser tab is hidden. The workbook export keeps full retained specimen telemetry.
 
 The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the sample ID, with Excel-invalid worksheet characters replaced and duplicate names made unique.
 
-The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, or faulted run is active.
+The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, relative move, or faulted run is active.
 
 Live plots do not clear automatically when a new sample starts or finishes. Use the Live Plots Clear button to clear the plot buffer and reset the chart view. Clearing the plots does not delete retained specimen samples or XLSX export data.
 
@@ -417,6 +419,7 @@ Automated-test API:
 GET  /api/test/state
 POST /api/test/start
 POST /api/test/return-zero
+POST /api/test/move-relative
 POST /api/test/pause
 POST /api/test/resume
 POST /api/test/stop

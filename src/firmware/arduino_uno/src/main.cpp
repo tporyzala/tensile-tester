@@ -88,15 +88,15 @@ AccelStepper stepper(
   Load-cell zeroing:
   - rawAdc is the raw HX711 number.
   - rawForceN() converts rawAdc into force using the calibration constants.
-  - tareForceN stores the force reading that should be treated as zero.
+  - tareRawAdc stores the raw reading that should be treated as zero.
   - operator tare commands average fresh HX711 readings for a timed window.
-  - measuredForceN() reports rawForceN() minus tareForceN.
+  - measuredForceN() reports force relative to tareRawAdc.
 */
 long rawAdc = 0;
 bool tareSet = false;
-float tareForceN = 0.0f;
+float tareRawAdc = 0.0f;
 bool tareAveraging = false;
-float tareForceSumN = 0.0f;
+float tareRawAdcSum = 0.0f;
 uint32_t tareSamplesCollected = 0;
 uint32_t tareStartedAtMs = 0;
 
@@ -269,7 +269,7 @@ float positionMm() {
       stepsPerMm();
 }
 
-float rawForceN() {
+float forceFromRawAdc(float adc) {
   /*
     Convert HX711 counts to force.
 
@@ -280,7 +280,7 @@ float rawForceN() {
     flips tension/compression direction without changing the calibration numbers.
   */
   float force = (
-      HardwareConfig::LoadCell::CalibrationSlopeNPerCount * static_cast<float>(rawAdc)) +
+      HardwareConfig::LoadCell::CalibrationSlopeNPerCount * adc) +
       HardwareConfig::LoadCell::CalibrationInterceptN;
   if (HardwareConfig::LoadCell::InvertSign) {
     force = -force;
@@ -288,10 +288,14 @@ float rawForceN() {
   return force;
 }
 
+float rawForceN() {
+  return forceFromRawAdc(static_cast<float>(rawAdc));
+}
+
 float measuredForceN() {
   // Report force relative to the current tare/zero point.
   const float force = rawForceN();
-  return tareSet ? (force - tareForceN) : force;
+  return tareSet ? (force - forceFromRawAdc(tareRawAdc)) : force;
 }
 
 void beginTareAverage(uint32_t nowMs) {
@@ -303,7 +307,7 @@ void beginTareAverage(uint32_t nowMs) {
     full tare time window, and ACK is sent only after the averaged zero is applied.
   */
   tareAveraging = true;
-  tareForceSumN = 0.0f;
+  tareRawAdcSum = 0.0f;
   tareSamplesCollected = 0;
   tareStartedAtMs = nowMs;
 }
@@ -315,14 +319,14 @@ void completeTareAverage() {
     return;
   }
 
-  tareForceN = tareForceSumN / static_cast<float>(tareSamplesCollected);
+  tareRawAdc = tareRawAdcSum / static_cast<float>(tareSamplesCollected);
   tareSet = true;
   tareAveraging = false;
   Serial.println(F("ACK,ZERO_LOAD"));
 }
 
 void addTareSample() {
-  tareForceSumN += rawForceN();
+  tareRawAdcSum += static_cast<float>(rawAdc);
   ++tareSamplesCollected;
 }
 
@@ -729,7 +733,7 @@ void updateLoadCell(uint32_t nowMs) {
 
   if (!tareSet) {
     // First valid load-cell reading becomes zero load for this power-up.
-    tareForceN = rawForceN();
+    tareRawAdc = static_cast<float>(rawAdc);
     tareSet = true;
   }
 }

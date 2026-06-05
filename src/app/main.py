@@ -7,17 +7,23 @@ import platform
 import re
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from pathlib import Path
+from typing import TypeVar
 
 import serial
 import xlsxwriter
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from app.calibration import CalibrationSample, fit_load_cell_calibration
+
+
+SetupCommandResult = TypeVar("SetupCommandResult")
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -68,9 +74,16 @@ STEPS_PER_MM = (
 )
 RETURN_ZERO_DISPLACEMENT_DEFAULT_RATE_MM_S = TEST_SPEED_DEFAULT / STEPS_PER_MM
 RETURN_ZERO_HOLD_DURATION_S = 1.0
+RELATIVE_MOVE_AMOUNTS_MM = frozenset({-100.0, -10.0, -1.0, 1.0, 10.0, 100.0})
+RELATIVE_MOVE_STATIONARY_STEP_RATE_MAX_STEPS_S = 0.5
 RUN_KIND_NONE = "NONE"
 RUN_KIND_SPECIMEN = "SPECIMEN"
 RUN_KIND_RETURN_ZERO = "RETURN_ZERO"
+RUN_KIND_RELATIVE_MOVE = "RELATIVE_MOVE"
+CALIBRATION_SAMPLE_DURATION_S = 12.0
+CALIBRATION_SAMPLE_POLL_S = 0.02
+CALIBRATION_SAMPLE_MIN_COUNT = 20
+CALIBRATION_STATIONARY_STEP_RATE_MAX_STEPS_S = 0.5
 
 
 @dataclass(slots=True)
@@ -209,6 +222,10 @@ class DisplacementZeroCommandError(MachineCommandError):
 
 
 class TestCommandError(MachineCommandError):
+    pass
+
+
+class CalibrationCommandError(MachineCommandError):
     pass
 
 
@@ -527,6 +544,65 @@ class SerialMonitor:
 
             await self._send_displacement_zero_with_retries()
 
+    async def sample_calibration_adc(
+        self,
+        reference_force_n: float,
+        duration_s: float = CALIBRATION_SAMPLE_DURATION_S,
+        minimum_sample_count: int = CALIBRATION_SAMPLE_MIN_COUNT,
+        poll_s: float = CALIBRATION_SAMPLE_POLL_S,
+    ) -> CalibrationSample:
+        async with self._command_lock:
+            self._ensure_calibration_sampling_allowed()
+            started_at = time.time()
+            started_monotonic = time.monotonic()
+            last_telemetry_seq = self.snapshot.telemetry_seq
+            samples: list[int] = []
+            self.snapshot.last_message = (
+                f"Capturing {duration_s:.0f} second calibration ADC average."
+            )
+
+            while (time.monotonic() - started_monotonic) < duration_s:
+                await asyncio.sleep(poll_s)
+                self._ensure_calibration_sampling_allowed()
+                if self.snapshot.telemetry_seq == last_telemetry_seq:
+                    continue
+                last_telemetry_seq = self.snapshot.telemetry_seq
+                moving = (
+                    abs(self.snapshot.step_rate_steps_s) >
+                    CALIBRATION_STATIONARY_STEP_RATE_MAX_STEPS_S
+                )
+                if moving:
+                    raise CalibrationCommandError(
+                        "Machine moved during calibration sampling; keep load still and retry.")
+                samples.append(self.snapshot.raw_adc)
+
+            finished_at = time.time()
+            if len(samples) < minimum_sample_count:
+                raise CalibrationCommandError(
+                    f"Calibration sample received only {len(samples)} fresh telemetry frames.")
+
+            sample_count = len(samples)
+            raw_adc_mean = sum(samples) / sample_count
+            variance = sum(
+                (sample - raw_adc_mean) * (sample - raw_adc_mean)
+                for sample in samples
+            ) / sample_count
+            result = CalibrationSample(
+                reference_force_n=reference_force_n,
+                raw_adc_mean=raw_adc_mean,
+                raw_adc_stddev=math.sqrt(variance),
+                raw_adc_min=min(samples),
+                raw_adc_max=max(samples),
+                sample_count=sample_count,
+                duration_s=time.monotonic() - started_monotonic,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            self.snapshot.last_message = (
+                f"Captured calibration point at {reference_force_n:.3f} N."
+            )
+            return result
+
     async def start_test(
         self,
         steps: list[TestStep],
@@ -585,39 +661,82 @@ class SerialMonitor:
                     "Stop the active test before returning to zero.")
 
             step = self._return_zero_step(request)
-            run_id = self._allocate_test_run_id()
-            if len(self._test_step_line(run_id, 1, step)) >= 90:
-                raise TestCommandError(
-                    "Return-to-zero command is too long for the Arduino serial command.")
-
-            self._test_steps = [step]
-            self._active_sample = None
-            self._test_run_kind = RUN_KIND_RETURN_ZERO
-            self._current_run_finalized = False
-            self._test_state = TestRunState(
-                run_id=run_id,
-                status="STARTING",
-                phase="STARTING",
-                step_count=1,
-                message=f"Starting return to {request.mode.lower()} zero.",
-                started_at=time.time(),
+            await self._start_utility_test_run(
+                step=step,
+                run_kind=RUN_KIND_RETURN_ZERO,
+                starting_message=f"Starting return to {request.mode.lower()} zero.",
+                running_message=f"Returning to {request.mode.lower()} zero.",
+                failure_message="Arduino did not start return to zero.",
+                length_error_message=(
+                    "Return-to-zero command is too long for the Arduino serial command."
+                ),
             )
 
-            try:
-                await self._send_test_command_with_retries(
-                    f"START_TEST,{run_id},1",
-                    "START_TEST",
-                    run_id,
-                )
-                await self._send_test_step(1)
-            except TestCommandError:
-                self._mark_test_fault("Arduino did not start return to zero.")
-                raise
+    async def move_relative(self, offset_mm: float) -> None:
+        async with self._command_lock:
+            if self._serial is None:
+                raise TestCommandError("Arduino is disconnected; relative move was not started.")
+            if self._test_blocks_setup_control():
+                raise TestCommandError(
+                    "Stop the active test before moving the load head.")
+            if abs(self.snapshot.step_rate_steps_s) > RELATIVE_MOVE_STATIONARY_STEP_RATE_MAX_STEPS_S:
+                raise TestCommandError(
+                    "Wait for the load head to stop before starting a relative move.")
 
-            self._test_state.status = "RUNNING"
-            self._test_state.phase = "RAMPING"
-            self._test_state.message = f"Returning to {request.mode.lower()} zero."
-            self._ensure_test_heartbeat(run_id)
+            signed_offset = f"{offset_mm:+g}"
+            await self._start_utility_test_run(
+                step=self._relative_move_step(offset_mm),
+                run_kind=RUN_KIND_RELATIVE_MOVE,
+                starting_message=f"Starting {signed_offset} mm relative move.",
+                running_message=f"Moving load head {signed_offset} mm.",
+                failure_message="Arduino did not start the relative move.",
+                length_error_message=(
+                    "Relative-move command is too long for the Arduino serial command."
+                ),
+            )
+
+    async def _start_utility_test_run(
+        self,
+        *,
+        step: TestStep,
+        run_kind: str,
+        starting_message: str,
+        running_message: str,
+        failure_message: str,
+        length_error_message: str,
+    ) -> None:
+        run_id = self._allocate_test_run_id()
+        if len(self._test_step_line(run_id, 1, step)) >= 90:
+            raise TestCommandError(length_error_message)
+
+        self._test_steps = [step]
+        self._active_sample = None
+        self._test_run_kind = run_kind
+        self._current_run_finalized = False
+        self._test_state = TestRunState(
+            run_id=run_id,
+            status="STARTING",
+            phase="STARTING",
+            step_count=1,
+            message=starting_message,
+            started_at=time.time(),
+        )
+
+        try:
+            await self._send_test_command_with_retries(
+                f"START_TEST,{run_id},1",
+                "START_TEST",
+                run_id,
+            )
+            await self._send_test_step(1)
+        except TestCommandError:
+            self._mark_test_fault(failure_message)
+            raise
+
+        self._test_state.status = "RUNNING"
+        self._test_state.phase = "RAMPING"
+        self._test_state.message = running_message
+        self._ensure_test_heartbeat(run_id)
 
     async def pause_test(self) -> None:
         await self._send_simple_test_command("PAUSE_TEST", "Pausing automated test.")
@@ -663,40 +782,66 @@ class SerialMonitor:
             hold_duration_s=0.0,
         )
 
+    def _relative_move_step(self, offset_mm: float) -> TestStep:
+        return TestStep(
+            target_type="DISPLACEMENT",
+            target_value=self.snapshot.position_mm + offset_mm,
+            rate_type="DISPLACEMENT",
+            rate_value_per_s=self.snapshot.test_max_step_rate_steps_s / STEPS_PER_MM,
+            hold_duration_s=0.0,
+        )
+
     async def _send_motion_with_retries(
         self,
         jog_speed_steps_s: float,
         test_max_step_rate_steps_s: float,
         acceleration_steps_s2: float,
     ) -> tuple[float, float, float]:
+        return await self._send_setup_command_with_retries(
+            command="SET_MOTION_LIMITS",
+            send_attempt=lambda: self._send_motion_attempt(
+                jog_speed_steps_s,
+                test_max_step_rate_steps_s,
+                acceleration_steps_s2,
+            ),
+            command_error_type=MotionCommandError,
+            attempts=MOTION_COMMAND_ATTEMPTS,
+            retry_delay_s=MOTION_RETRY_DELAY_S,
+        )
+
+    async def _send_setup_command_with_retries(
+        self,
+        *,
+        command: str,
+        send_attempt: Callable[[], Awaitable[SetupCommandResult]],
+        command_error_type: type[MachineCommandError],
+        attempts: int,
+        retry_delay_s: float,
+    ) -> SetupCommandResult:
         last_error: Exception | None = None
-        for attempt in range(1, MOTION_COMMAND_ATTEMPTS + 1):
+        for attempt in range(1, attempts + 1):
             try:
-                return await self._send_motion_attempt(
-                    jog_speed_steps_s,
-                    test_max_step_rate_steps_s,
-                    acceleration_steps_s2,
-                )
+                return await send_attempt()
             except TimeoutError as exc:
                 last_error = exc
-                message = "Arduino did not acknowledge SET_MOTION_LIMITS before the timeout."
-            except MotionCommandError as exc:
+                message = f"Arduino did not acknowledge {command} before the timeout."
+            except command_error_type as exc:
                 last_error = exc
                 message = str(exc)
 
-            if attempt < MOTION_COMMAND_ATTEMPTS:
+            if attempt < attempts:
                 retry_message = (
-                    f"{message} Retrying SET_MOTION_LIMITS "
-                    f"({attempt + 1}/{MOTION_COMMAND_ATTEMPTS})."
+                    f"{message} Retrying {command} "
+                    f"({attempt + 1}/{attempts})."
                 )
                 self.snapshot.last_message = retry_message
                 self._log_serial("SYS", retry_message)
-                await asyncio.sleep(MOTION_RETRY_DELAY_S)
+                await asyncio.sleep(retry_delay_s)
 
-        final_message = f"Arduino did not confirm SET_MOTION_LIMITS after {MOTION_COMMAND_ATTEMPTS} attempts."
+        final_message = f"Arduino did not confirm {command} after {attempts} attempts."
         self.snapshot.last_message = final_message
         self._log_serial("SYS", final_message)
-        raise MotionCommandError(final_message) from last_error
+        raise command_error_type(final_message) from last_error
 
     async def _send_motion_attempt(
         self,
@@ -724,31 +869,13 @@ class SerialMonitor:
             self._motion_expected = None
 
     async def _send_tare_with_retries(self) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, TARE_COMMAND_ATTEMPTS + 1):
-            try:
-                await self._send_tare_attempt()
-                return
-            except TimeoutError as exc:
-                last_error = exc
-                message = "Arduino did not acknowledge ZERO_LOAD before the timeout."
-            except TareCommandError as exc:
-                last_error = exc
-                message = str(exc)
-
-            if attempt < TARE_COMMAND_ATTEMPTS:
-                retry_message = (
-                    f"{message} Retrying ZERO_LOAD "
-                    f"({attempt + 1}/{TARE_COMMAND_ATTEMPTS})."
-                )
-                self.snapshot.last_message = retry_message
-                self._log_serial("SYS", retry_message)
-                await asyncio.sleep(TARE_RETRY_DELAY_S)
-
-        final_message = f"Arduino did not confirm ZERO_LOAD after {TARE_COMMAND_ATTEMPTS} attempts."
-        self.snapshot.last_message = final_message
-        self._log_serial("SYS", final_message)
-        raise TareCommandError(final_message) from last_error
+        await self._send_setup_command_with_retries(
+            command="ZERO_LOAD",
+            send_attempt=self._send_tare_attempt,
+            command_error_type=TareCommandError,
+            attempts=TARE_COMMAND_ATTEMPTS,
+            retry_delay_s=TARE_RETRY_DELAY_S,
+        )
 
     async def _send_tare_attempt(self) -> None:
         loop = asyncio.get_running_loop()
@@ -765,33 +892,13 @@ class SerialMonitor:
             self._tare_ack_future = None
 
     async def _send_displacement_zero_with_retries(self) -> None:
-        last_error: Exception | None = None
-        for attempt in range(1, DISPLACEMENT_ZERO_COMMAND_ATTEMPTS + 1):
-            try:
-                await self._send_displacement_zero_attempt()
-                return
-            except TimeoutError as exc:
-                last_error = exc
-                message = "Arduino did not acknowledge ZERO_DISPLACEMENT before the timeout."
-            except DisplacementZeroCommandError as exc:
-                last_error = exc
-                message = str(exc)
-
-            if attempt < DISPLACEMENT_ZERO_COMMAND_ATTEMPTS:
-                retry_message = (
-                    f"{message} Retrying ZERO_DISPLACEMENT "
-                    f"({attempt + 1}/{DISPLACEMENT_ZERO_COMMAND_ATTEMPTS})."
-                )
-                self.snapshot.last_message = retry_message
-                self._log_serial("SYS", retry_message)
-                await asyncio.sleep(DISPLACEMENT_ZERO_RETRY_DELAY_S)
-
-        final_message = (
-            "Arduino did not confirm ZERO_DISPLACEMENT after "
-            f"{DISPLACEMENT_ZERO_COMMAND_ATTEMPTS} attempts.")
-        self.snapshot.last_message = final_message
-        self._log_serial("SYS", final_message)
-        raise DisplacementZeroCommandError(final_message) from last_error
+        await self._send_setup_command_with_retries(
+            command="ZERO_DISPLACEMENT",
+            send_attempt=self._send_displacement_zero_attempt,
+            command_error_type=DisplacementZeroCommandError,
+            attempts=DISPLACEMENT_ZERO_COMMAND_ATTEMPTS,
+            retry_delay_s=DISPLACEMENT_ZERO_RETRY_DELAY_S,
+        )
 
     async def _send_displacement_zero_attempt(self) -> None:
         loop = asyncio.get_running_loop()
@@ -964,6 +1071,7 @@ class SerialMonitor:
             await self.send("GET_STATUS")
             await self.send(self._motion_command())
         except Exception as exc:
+            await self._close_serial()
             self.snapshot.connected = False
             self.snapshot.state = "DISCONNECTED"
             self.snapshot.frame_mode = "DISCONNECTED"
@@ -1389,23 +1497,31 @@ class SerialMonitor:
 
     def _mark_test_complete(self) -> None:
         was_return_zero = self._test_run_kind == RUN_KIND_RETURN_ZERO
+        was_relative_move = self._test_run_kind == RUN_KIND_RELATIVE_MOVE
         self._finalize_active_sample("COMPLETE")
         self._test_state.status = "COMPLETE"
         self._test_state.phase = "COMPLETE"
         self._test_state.finished_at = self._test_state.finished_at or time.time()
-        self._test_state.message = (
-            "Return to zero complete." if was_return_zero else "Automated test complete.")
+        if was_return_zero:
+            self._test_state.message = "Return to zero complete."
+        elif was_relative_move:
+            self._test_state.message = "Relative move complete."
+        else:
+            self._test_state.message = "Automated test complete."
         self._stop_test_heartbeat()
         self._reset_live_test_snapshot_to_setup()
         self._clear_active_run_context()
 
     def _mark_test_stopped(self) -> None:
         was_return_zero = self._test_run_kind == RUN_KIND_RETURN_ZERO
+        was_relative_move = self._test_run_kind == RUN_KIND_RELATIVE_MOVE
         self._finalize_active_sample("STOPPED")
-        message = (
-            "Return to zero stopped; controller returned to idle."
-            if was_return_zero
-            else "Automated test stopped; partial sample kept and controller returned to idle.")
+        if was_return_zero:
+            message = "Return to zero stopped; controller returned to idle."
+        elif was_relative_move:
+            message = "Relative move stopped; controller returned to idle."
+        else:
+            message = "Automated test stopped; partial sample kept and controller returned to idle."
         self._test_state.run_id = 0
         self._test_state.status = "IDLE"
         self._test_state.phase = "NONE"
@@ -1452,6 +1568,24 @@ class SerialMonitor:
         if self.snapshot.test_phase != "NONE":
             return True
         return self._test_state.status in {"STARTING", "RUNNING", "PAUSED", "WAITING_NEXT", "FAULT"}
+
+    def _ensure_calibration_sampling_allowed(self) -> None:
+        if not self.snapshot.connected:
+            raise CalibrationCommandError(
+                "Arduino is disconnected; calibration sample was not captured.")
+        if self._test_blocks_setup_control():
+            raise CalibrationCommandError(
+                "Machine is active; stop the current action before calibration sampling.")
+        if self.snapshot.frame_mode == "FAULT" or self.snapshot.fault_reason != "NONE":
+            raise CalibrationCommandError(
+                "Machine is faulted; clear the fault before calibration sampling.")
+        moving = (
+            abs(self.snapshot.step_rate_steps_s) >
+            CALIBRATION_STATIONARY_STEP_RATE_MAX_STEPS_S
+        )
+        if moving:
+            raise CalibrationCommandError(
+                "Machine is moving; stop motion before calibration sampling.")
 
 
 config = AppConfig()
@@ -1545,6 +1679,30 @@ async def zero_displacement(request: Request) -> JSONResponse:
     return JSONResponse(data)
 
 
+@app.post("/api/calibration/sample")
+async def calibration_sample(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        reference_force_n = parse_finite_float(
+            body.get("reference_force_n"), "Reference force")
+        sample = await request.app.state.monitor.sample_calibration_adc(
+            reference_force_n)
+    except (ValueError, CalibrationCommandError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(asdict(sample))
+
+
+@app.post("/api/calibration/fit")
+async def calibration_fit(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        points = parse_calibration_points(body)
+        fit = fit_load_cell_calibration(points)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(fit)
+
+
 @app.get("/api/test/state")
 async def test_state(request: Request) -> JSONResponse:
     return JSONResponse(request.app.state.monitor.public_test_state())
@@ -1569,6 +1727,17 @@ async def return_to_zero(request: Request) -> JSONResponse:
     try:
         return_request = parse_return_zero_request(body)
         await request.app.state.monitor.return_to_zero(return_request)
+    except (ValueError, TestCommandError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(request.app.state.monitor.public_test_state())
+
+
+@app.post("/api/test/move-relative")
+async def move_relative(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        offset_mm = parse_relative_move_offset(body)
+        await request.app.state.monitor.move_relative(offset_mm)
     except (ValueError, TestCommandError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse(request.app.state.monitor.public_test_state())
@@ -1730,6 +1899,77 @@ def parse_return_zero_request(body: dict[str, object]) -> ReturnZeroRequest:
     if rate <= 0.0:
         raise ValueError("Return-to-zero rate must be greater than zero.")
     return ReturnZeroRequest(mode=mode, rate_value_per_s=rate)
+
+
+def parse_relative_move_offset(body: dict[str, object]) -> float:
+    offset_mm = parse_finite_float(body.get("offset_mm"), "Relative move offset")
+    if offset_mm not in RELATIVE_MOVE_AMOUNTS_MM:
+        allowed = ", ".join(f"{amount:+g}" for amount in sorted(
+            RELATIVE_MOVE_AMOUNTS_MM, reverse=True))
+        raise ValueError(f"Relative move offset must be one of: {allowed} mm.")
+    return offset_mm
+
+
+def parse_calibration_points(body: dict[str, object]) -> list[CalibrationSample]:
+    raw_points = body.get("points")
+    if not isinstance(raw_points, list):
+        raise ValueError("Calibration points must be a list.")
+
+    points: list[CalibrationSample] = []
+    for index, raw_point in enumerate(raw_points, start=1):
+        if not isinstance(raw_point, dict):
+            raise ValueError(f"Calibration point {index} is not valid.")
+        reference_force_n = parse_finite_float(
+            raw_point.get("reference_force_n"),
+            f"Calibration point {index} reference force",
+        )
+        raw_adc_mean = parse_finite_float(
+            raw_point.get("raw_adc_mean"),
+            f"Calibration point {index} raw ADC mean",
+        )
+        points.append(CalibrationSample(
+            reference_force_n=reference_force_n,
+            raw_adc_mean=raw_adc_mean,
+            raw_adc_stddev=parse_optional_calibration_float(
+                raw_point, "raw_adc_stddev", 0.0),
+            raw_adc_min=parse_optional_calibration_float(
+                raw_point, "raw_adc_min", raw_adc_mean),
+            raw_adc_max=parse_optional_calibration_float(
+                raw_point, "raw_adc_max", raw_adc_mean),
+            sample_count=parse_optional_calibration_int(
+                raw_point, "sample_count", 0),
+            duration_s=parse_optional_calibration_float(
+                raw_point, "duration_s", 0.0),
+            started_at=parse_optional_calibration_float(
+                raw_point, "started_at", 0.0),
+            finished_at=parse_optional_calibration_float(
+                raw_point, "finished_at", 0.0),
+        ))
+    return points
+
+
+def parse_optional_calibration_float(
+    raw_point: dict[str, object],
+    key: str,
+    default: float,
+) -> float:
+    value = raw_point.get(key, default)
+    return parse_finite_float(value, key)
+
+
+def parse_optional_calibration_int(
+    raw_point: dict[str, object],
+    key: str,
+    default: int,
+) -> int:
+    value = raw_point.get(key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer.") from exc
+    if parsed < 0:
+        raise ValueError(f"{key} cannot be negative.")
+    return parsed
 
 
 def parse_boolean(value: object, label: str) -> bool:
