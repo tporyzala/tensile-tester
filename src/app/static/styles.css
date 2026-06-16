@@ -338,32 +338,65 @@ input[type="range"] {
   margin-top: 18px;
 }
 
+.manual-motion-controls {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  border-top: 1px solid #e4e8eb;
+  padding-top: 14px;
+}
+
 .sample-run-controls,
 .return-zero-controls {
   display: grid;
   grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
   gap: 12px;
+}
+
+.sample-run-controls {
   margin-top: 18px;
 }
 
 .return-zero-controls {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(112px, 0.85fr);
+  gap: 8px;
   align-items: end;
 }
 
 .return-zero-controls .action-button {
   grid-column: 1 / -1;
+  min-height: 40px;
+  border-color: #172026;
+  background: #172026;
+  color: #ffffff;
 }
 
 .relative-move-controls {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
+  gap: 6px;
 }
 
 .relative-move-controls .action-button {
-  padding-inline: 8px;
+  min-height: 38px;
+  border-radius: 7px;
+  padding: 9px 8px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.relative-move-button[data-offset-mm^="-"] {
+  border-color: #ddb0a9;
+  background: #fff5f3;
+  color: #7f2c25;
+}
+
+.relative-move-button[data-offset-mm="1"],
+.relative-move-button[data-offset-mm="10"],
+.relative-move-button[data-offset-mm="100"] {
+  border-color: #a8c9d6;
+  background: #eef8fb;
+  color: #105b78;
 }
 
 .field-control {

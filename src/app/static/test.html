@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tensile Tester Test</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260607-relative-move">
+  <link rel="stylesheet" href="/static/styles.css?v=20260616-motion-controls">
   <script src="/static/vendor/plotly-basic-3.5.1.min.js" defer></script>
-  <script src="/static/live-charts.js?v=20260607-chart-performance" defer></script>
+  <script src="/static/live-charts.js?v=20260616-chart-lines" defer></script>
   <script src="/static/test.js?v=20260607-chart-performance" defer></script>
 </head>
 <body>
@@ -88,28 +88,30 @@
               </div>
             </div>
 
-            <div class="return-zero-controls" aria-label="Return to zero">
-              <label class="field-control">
-                <span class="label">Return</span>
-                <select id="return-zero-mode" class="table-input">
-                  <option value="LOAD">Load</option>
-                  <option value="DISPLACEMENT" selected>Displacement</option>
-                </select>
-              </label>
-              <label class="field-control">
-                <span id="return-zero-rate-label" class="label">Rate (mm/s)</span>
-                <input id="return-zero-rate" class="table-input" type="number" min="0.0001" max="0.1562" step="0.0001" value="0.1562">
-              </label>
-              <button id="return-zero-button" class="action-button" type="button">Return to Zero</button>
-            </div>
+            <div class="manual-motion-controls">
+              <div class="return-zero-controls" aria-label="Return to zero">
+                <label class="field-control">
+                  <span class="label">Target</span>
+                  <select id="return-zero-mode" class="table-input">
+                    <option value="LOAD">Load</option>
+                    <option value="DISPLACEMENT" selected>Displacement</option>
+                  </select>
+                </label>
+                <label class="field-control">
+                  <span id="return-zero-rate-label" class="label">Rate (mm/s)</span>
+                  <input id="return-zero-rate" class="table-input" type="number" min="0.0001" max="0.1562" step="0.0001" value="0.1562">
+                </label>
+                <button id="return-zero-button" class="action-button" type="button">Return to Zero</button>
+              </div>
 
-            <div class="relative-move-controls" aria-label="Move load head by relative displacement">
-              <button class="action-button relative-move-button" data-offset-mm="100" type="button">+100 mm</button>
-              <button class="action-button relative-move-button" data-offset-mm="10" type="button">+10 mm</button>
-              <button class="action-button relative-move-button" data-offset-mm="1" type="button">+1 mm</button>
-              <button class="action-button relative-move-button" data-offset-mm="-1" type="button">-1 mm</button>
-              <button class="action-button relative-move-button" data-offset-mm="-10" type="button">-10 mm</button>
-              <button class="action-button relative-move-button" data-offset-mm="-100" type="button">-100 mm</button>
+              <div class="relative-move-controls" aria-label="Move load head by relative displacement">
+                <button class="action-button relative-move-button" data-offset-mm="100" type="button">+100 mm</button>
+                <button class="action-button relative-move-button" data-offset-mm="10" type="button">+10 mm</button>
+                <button class="action-button relative-move-button" data-offset-mm="1" type="button">+1 mm</button>
+                <button class="action-button relative-move-button" data-offset-mm="-100" type="button">-100 mm</button>
+                <button class="action-button relative-move-button" data-offset-mm="-10" type="button">-10 mm</button>
+                <button class="action-button relative-move-button" data-offset-mm="-1" type="button">-1 mm</button>
+              </div>
             </div>
 
             <div class="test-actions">

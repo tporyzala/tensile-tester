@@ -191,22 +191,29 @@ class LiveForceCharts {
     const times = points.map((point) => point.timeS);
     const forces = points.map((point) => point.forceN);
     const positions = points.map((point) => point.positionMm);
-    const commanded = points.map((point) => point.commandedForceN);
     const customData = points.map(pointCustomData);
-    const emptyCustomData = points.map(() => null);
 
     this.incrementalUpdateInFlight = true;
     let updates;
     try {
+      const timeTraceUpdate = {
+        x: [times],
+        y: [forces],
+        customdata: [customData],
+      };
+      const timeTraceIndexes = [0];
+      if (this.hasCommandedForce) {
+        timeTraceUpdate.x.push(times);
+        timeTraceUpdate.y.push(points.map((point) => point.commandedForceN));
+        timeTraceUpdate.customdata.push(points.map(() => null));
+        timeTraceIndexes.push(1);
+      }
+
       updates = [
         window.Plotly.extendTraces(
           this.timeChart,
-          {
-            x: [times, times],
-            y: [forces, commanded],
-            customdata: [customData, emptyCustomData],
-          },
-          [0, 1],
+          timeTraceUpdate,
+          timeTraceIndexes,
           LIVE_DISPLAY_MAX_POINTS,
         ),
         window.Plotly.extendTraces(
@@ -240,47 +247,46 @@ class LiveForceCharts {
   timeTraces() {
     const measured = {
       type: PLOT_TRACE_TYPE,
-      mode: "lines+markers",
+      mode: "lines",
       name: "Measured",
       showlegend: true,
       x: this.livePoints.map((point) => point.timeS),
       y: this.livePoints.map((point) => point.forceN),
       customdata: this.livePoints.map(pointCustomData),
       line: { color: "#176a8f", width: 2 },
-      marker: { color: "#176a8f", size: 4 },
       hovertemplate:
         "Time %{x:.3f} s<br>Force %{y:.4f} N<br>Phase %{customdata[0]}<br>Step %{customdata[1]}<br>Rate %{customdata[3]:.2f} steps/s<extra></extra>",
     };
 
-    return [
-      measured,
-      {
-        type: PLOT_TRACE_TYPE,
-        mode: "lines",
-        name: "Commanded",
-        showlegend: this.hasCommandedForce,
-        x: this.livePoints.map((point) => point.timeS),
-        y: this.livePoints.map((point) => point.commandedForceN),
-        customdata: this.livePoints.map(() => null),
-        connectgaps: false,
-        line: { color: "#9a6a13", width: 2, dash: "dash" },
-        hovertemplate: "Time %{x:.3f} s<br>Commanded %{y:.4f} N<extra></extra>",
-      },
-    ];
+    if (!this.hasCommandedForce) {
+      return [measured];
+    }
+
+    return [measured, {
+      type: PLOT_TRACE_TYPE,
+      mode: "lines",
+      name: "Commanded",
+      showlegend: true,
+      x: this.livePoints.map((point) => point.timeS),
+      y: this.livePoints.map((point) => point.commandedForceN),
+      customdata: this.livePoints.map(() => null),
+      connectgaps: false,
+      line: { color: "#9a6a13", width: 2, dash: "dash" },
+      hovertemplate: "Time %{x:.3f} s<br>Commanded %{y:.4f} N<extra></extra>",
+    }];
   }
 
   displacementTraces() {
     const traces = [
       {
         type: PLOT_TRACE_TYPE,
-        mode: "lines+markers",
+        mode: "lines",
         name: "Measured",
         showlegend: true,
         x: this.livePoints.map((point) => point.positionMm),
         y: this.livePoints.map((point) => point.forceN),
         customdata: this.livePoints.map(pointCustomData),
         line: { color: "#176a8f", width: 2 },
-        marker: { color: "#176a8f", size: 4 },
         hovertemplate:
           "Displacement %{x:.5f} mm<br>Force %{y:.4f} N<br>Phase %{customdata[0]}<br>Step %{customdata[1]}<extra></extra>",
       },
