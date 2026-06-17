@@ -7,7 +7,7 @@ This `src/` workspace is intentionally small. The current behavior is:
 - Releasing both jog buttons stops setup jog step pulses. Button 3 on D4 is reported as the stop button.
 - During an automated test, Button 1 pauses/resumes and Button 2 or Button 3 stops the run.
 - Raspberry Pi serves one automated-test page where the operator defines any number of force or displacement steps.
-- The automated-test page keeps an in-memory sample set: one specimen at a time, editable step methods, setup motion sliders, sample ID/notes, include/exclude controls, force-displacement overlays, setup tare/displacement zeroing, live charts, a raw serial log, and one XLSX workbook export.
+- The automated-test page keeps an in-memory sample set: one specimen at a time, editable step methods, setup motion sliders, automatic sample numbers, notes, include/exclude controls, force-displacement overlays, setup tare/displacement zeroing, live charts, a raw serial log, and one XLSX workbook export.
 - Plots keep accumulating data until the operator clicks the plot Clear button.
 
 There is no database, persistent run storage across app restarts, limit switch handling, overload shutoff, audit trail, ASTM report generation, barcode workflow, or emergency-stop chain in this version.
@@ -275,9 +275,9 @@ The step table and motion settings can be saved as named test methods. The save 
 
 Methods can optionally run a preload initialization before the specimen sample starts. The preload/unload/zero mode moves at the configured initialization rate until the signed preload force is reached, unloads to `0 N`, holds each point for 1 second, sends `ZERO_DISPLACEMENT`, clears the live plot buffer, then starts the real test steps. Initialization telemetry is a utility run and is not archived as specimen data. The max-travel setting aborts initialization if the preload force is not reached within that displacement window.
 
-Each sample has a sample ID and optional notes. The default sample ID increments as `Sample 1`, `Sample 2`, and so on. Sample IDs are limited to 64 characters and notes are limited to 200 characters.
+Each sample gets an automatic sample number, displayed as `Sample 1`, `Sample 2`, and so on. The notes field is where the operator describes the actual specimen. Notes are limited to 200 characters.
 
-Completed samples are included by default. Stopped or faulted samples are retained in the sample set but excluded from overlays until the operator includes them. The sample table shows index, ID, status, method, point count, peak force, final displacement, include/exclude state, and notes.
+Completed samples are included by default. Stopped or faulted samples are retained in the sample set but excluded from overlays until the operator includes them. The sample table shows index, sample, status, method, point count, peak force, final displacement, include/exclude state, and notes.
 
 The Tare button posts to `/api/tare`. The Python app sends `ZERO_LOAD`, waits for `ACK,ZERO_LOAD`, then the Arduino treats the average of all fresh load-cell readings collected over 5 seconds as the new zero point. Tare collection is non-blocking, so serial handling, button reads, and stepper updates continue while tare is in progress.
 
@@ -287,7 +287,7 @@ The automated-test page has fixed `+100`, `+10`, `+1`, `-1`, `-10`, and `-100 mm
 
 The live charts are rendered with the vendored Plotly basic bundle. The Python app retains every received periodic telemetry point for the live plot buffer until the operator clicks Clear, while the browser incrementally renders only the most recent 5,000 live points. The force-time chart can show or hide the commanded-force trace. The force-displacement chart can overlay finalized included samples; overlay display traces are uniformly reduced to at most 2,000 points per sample and drawn without markers. Chart rendering pauses while the Automated Test tab or browser tab is hidden. The workbook export keeps full retained specimen telemetry.
 
-The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the sample ID, with Excel-invalid worksheet characters replaced and duplicate names made unique. The workbook includes the method ID, method name, method hash, and full method snapshot used when that sample started.
+The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the automatic sample number, with Excel-invalid worksheet characters replaced and duplicate names made unique. The workbook includes the method ID, method name, method hash, and full method snapshot used when that sample started.
 
 The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, relative move, or faulted run is active.
 
@@ -454,7 +454,6 @@ It also accepts optional sample metadata:
 ```json
 {
   "sample": {
-    "id": "A-1",
     "notes": "first coupon"
   },
   "steps": [

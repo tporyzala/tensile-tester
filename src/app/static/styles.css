@@ -628,6 +628,19 @@ input[type="range"] {
   accent-color: #176a8f;
 }
 
+.readonly-value {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  border: 1px solid #d8dee2;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #f5f7f8;
+  color: #172026;
+  font-size: 14px;
+  font-weight: 800;
+}
+
 .toggle-control.compact {
   min-height: 0;
   font-size: 12px;

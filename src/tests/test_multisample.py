@@ -140,6 +140,13 @@ class MultiSampleTests(unittest.TestCase):
         self.assertEqual(parsed.sample_id, "A-1")
         self.assertEqual(parsed.notes, "first coupon")
 
+        parsed = parse_sample_metadata(
+            {"sample": {"notes": "second coupon"}},
+            "Sample 2",
+        )
+        self.assertEqual(parsed.sample_id, "Sample 2")
+        self.assertEqual(parsed.notes, "second coupon")
+
         with self.assertRaises(ValueError):
             parse_sample_metadata({"sample": {"id": "x" * 65}}, "Sample 1")
 

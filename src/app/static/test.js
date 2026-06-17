@@ -25,7 +25,6 @@ let plotCursor = 0;
 let plotResetId = null;
 let plotRefreshInFlight = false;
 let plotGeneration = 0;
-let lastSubmittedSampleId = "";
 let lastMachine = {};
 let calibrationPoints = [];
 let calibrationFit = null;
@@ -363,7 +362,6 @@ function updateButtons(status) {
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
   $("add-step-button").disabled = setupBusy;
   $("clear-samples-button").disabled = setupBusy || blocked || samples.length === 0;
-  $("sample-id").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   $("sample-notes").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   for (const slider of motionSliders()) {
     slider.disabled = setupControlsDisabled;
@@ -561,20 +559,14 @@ function updateSampleSet(sampleSet) {
 
 function updateSampleDefaults(sampleSet) {
   const nextSampleId = sampleSet.next_sample_id || "Sample 1";
-  const sampleInput = $("sample-id");
+  const sampleDisplay = $("sample-id");
   const notesInput = $("sample-notes");
   const activeSample = sampleSet.active_sample;
-  const canReplace =
-    !sampleInput.value ||
-    sampleInput.value === sampleInput.dataset.defaultValue ||
-    (!activeSample && lastSubmittedSampleId && sampleInput.value === lastSubmittedSampleId);
-  if (canReplace) {
-    sampleInput.value = nextSampleId;
-    sampleInput.dataset.defaultValue = nextSampleId;
-    if (!activeSample && lastSubmittedSampleId) {
-      notesInput.value = "";
-      lastSubmittedSampleId = "";
-    }
+  const previousSampleId = sampleDisplay.dataset.defaultValue || "";
+  sampleDisplay.textContent = activeSample?.sample_id || nextSampleId;
+  sampleDisplay.dataset.defaultValue = nextSampleId;
+  if (!activeSample && previousSampleId && previousSampleId !== nextSampleId) {
+    notesInput.value = "";
   }
 }
 
@@ -1322,8 +1314,6 @@ async function loadSelectedMethod() {
 
 async function startTest() {
   readStepsFromTable();
-  const sampleId = $("sample-id").value.trim();
-  lastSubmittedSampleId = sampleId;
   const motionUpdated = await sendMotionUpdate();
   if (!motionUpdated) {
     return;
@@ -1339,7 +1329,6 @@ async function startTest() {
         steps,
         method_snapshot: currentMethodSnapshot(),
         sample: {
-          id: sampleId,
           notes: $("sample-notes").value.trim(),
         },
       }),
