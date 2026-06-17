@@ -9,6 +9,7 @@ let methodList = [];
 let selectedMethodId = "";
 let serialAutoScroll = true;
 let commandInFlight = false;
+let startInFlight = false;
 let tareInFlight = false;
 let displacementZeroInFlight = false;
 let motionInFlight = false;
@@ -47,6 +48,14 @@ const tabTitles = {
 const returnZeroRates = {
   LOAD: { value: 10, label: "Rate (N/s)", step: "0.1", max: "" },
   DISPLACEMENT: { value: 0.2604, label: "Rate (mm/s)", step: "0.0001", max: "0.2604" },
+};
+const INITIALIZATION_MODE_NONE = "NONE";
+const INITIALIZATION_MODE_PRELOAD = "PRELOAD_UNLOAD_ZERO_DISPLACEMENT";
+const DEFAULT_INITIALIZATION = {
+  mode: INITIALIZATION_MODE_NONE,
+  preload_force_n: 10,
+  rate_mm_s: 0.02,
+  max_travel_mm: 2,
 };
 let lastDisplacementReturnDefault = returnZeroRates.DISPLACEMENT.value;
 const liveCharts = new LiveForceCharts(
@@ -151,6 +160,48 @@ function currentMotionSnapshot() {
   };
 }
 
+function normalizedInitialization(initialization = {}) {
+  const mode = initialization.mode === INITIALIZATION_MODE_PRELOAD
+    ? INITIALIZATION_MODE_PRELOAD
+    : INITIALIZATION_MODE_NONE;
+  return {
+    mode,
+    preload_force_n: Number.isFinite(Number(initialization.preload_force_n))
+      ? Number(initialization.preload_force_n)
+      : DEFAULT_INITIALIZATION.preload_force_n,
+    rate_mm_s: Number.isFinite(Number(initialization.rate_mm_s))
+      ? Number(initialization.rate_mm_s)
+      : DEFAULT_INITIALIZATION.rate_mm_s,
+    max_travel_mm: Number.isFinite(Number(initialization.max_travel_mm))
+      ? Number(initialization.max_travel_mm)
+      : DEFAULT_INITIALIZATION.max_travel_mm,
+  };
+}
+
+function currentInitializationSnapshot() {
+  return {
+    mode: $("initialization-mode").value === INITIALIZATION_MODE_PRELOAD
+      ? INITIALIZATION_MODE_PRELOAD
+      : INITIALIZATION_MODE_NONE,
+    preload_force_n: Number($("initialization-preload-force").value),
+    rate_mm_s: Number($("initialization-rate").value),
+    max_travel_mm: Number($("initialization-max-travel").value),
+  };
+}
+
+function updateInitializationVisibility() {
+  $("initialization-fields").hidden = $("initialization-mode").value !== INITIALIZATION_MODE_PRELOAD;
+}
+
+function applyInitialization(initialization = {}) {
+  const parsed = normalizedInitialization(initialization);
+  $("initialization-mode").value = parsed.mode;
+  $("initialization-preload-force").value = String(parsed.preload_force_n);
+  $("initialization-rate").value = String(parsed.rate_mm_s);
+  $("initialization-max-travel").value = String(parsed.max_travel_mm);
+  updateInitializationVisibility();
+}
+
 function currentMethodSnapshot(nameOverride = "") {
   readStepsFromTable();
   const name = nameOverride || currentMethod?.name || "Unsaved Method";
@@ -160,6 +211,7 @@ function currentMethodSnapshot(nameOverride = "") {
     name,
     steps: cloneSteps(steps),
     motion: currentMotionSnapshot(),
+    initialization: currentInitializationSnapshot(),
   };
 }
 
@@ -189,6 +241,7 @@ function applyMethod(method) {
   if (Number.isFinite(Number(motion.acceleration_steps_s2))) {
     $("acceleration-slider").value = String(motion.acceleration_steps_s2);
   }
+  applyInitialization(method.initialization);
   updateMotionLabels();
   renderSteps();
   setMethodDirty(false);
@@ -285,32 +338,33 @@ function updateButtons(status) {
   const readyForSetupActions = ["IDLE", "COMPLETE"].includes(status);
   const zeroingInFlight = tareInFlight || displacementZeroInFlight;
   const calibrationBusy = calibrationSampleInFlight;
+  const setupBusy = commandInFlight || startInFlight;
   const setupControlsDisabled =
-    commandInFlight || zeroingInFlight || motionInFlight || calibrationBusy ||
+    setupBusy || zeroingInFlight || motionInFlight || calibrationBusy ||
     !readyForSetupActions || !lastConnected;
   const samples = getCurrentSamples();
   $("start-button").disabled =
-    commandInFlight || motionInFlight || zeroingInFlight ||
+    setupBusy || motionInFlight || zeroingInFlight ||
     calibrationBusy || !readyForSetupActions;
-  $("tare-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("tare-button").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   $("tare-button").textContent = tareInFlight ? "Taring" : "Tare";
-  $("zero-displacement-button").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("zero-displacement-button").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   $("zero-displacement-button").textContent = displacementZeroInFlight ? "Zeroing" : "Zero Displacement";
   $("return-zero-button").disabled =
-    commandInFlight || motionInFlight || zeroingInFlight ||
+    setupBusy || motionInFlight || zeroingInFlight ||
     calibrationBusy || !readyForSetupActions;
   for (const button of document.querySelectorAll(".relative-move-button")) {
     button.disabled =
-      commandInFlight || motionInFlight || zeroingInFlight ||
+      setupBusy || motionInFlight || zeroingInFlight ||
       calibrationBusy || !readyForSetupActions || !lastConnected;
   }
   $("pause-button").disabled = commandInFlight || !["RUNNING", "PAUSED", "WAITING_NEXT"].includes(status);
   $("pause-button").textContent = status === "PAUSED" ? "Resume" : "Pause";
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
-  $("add-step-button").disabled = commandInFlight;
-  $("clear-samples-button").disabled = commandInFlight || blocked || samples.length === 0;
-  $("sample-id").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
-  $("sample-notes").disabled = commandInFlight || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("add-step-button").disabled = setupBusy;
+  $("clear-samples-button").disabled = setupBusy || blocked || samples.length === 0;
+  $("sample-id").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("sample-notes").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
   for (const slider of motionSliders()) {
     slider.disabled = setupControlsDisabled;
   }
@@ -1274,14 +1328,33 @@ async function startTest() {
   if (!motionUpdated) {
     return;
   }
-  await postJson("/api/test/start", {
-    steps,
-    method_snapshot: currentMethodSnapshot(),
-    sample: {
-      id: sampleId,
-      notes: $("sample-notes").value.trim(),
-    },
-  });
+  startInFlight = true;
+  updateButtons(lastStatus);
+  setMessage("Starting automated test.");
+  try {
+    const { response, data } = await requestJson("/api/test/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        steps,
+        method_snapshot: currentMethodSnapshot(),
+        sample: {
+          id: sampleId,
+          notes: $("sample-notes").value.trim(),
+        },
+      }),
+    });
+    if (!response.ok) {
+      setMessage(data.detail || `HTTP ${response.status}`);
+      return;
+    }
+    updatePage(data);
+  } catch (error) {
+    setMessage(`Web app error: ${error}`);
+  } finally {
+    startInFlight = false;
+    updateButtons(lastStatus);
+  }
 }
 
 async function returnToZero() {
@@ -1427,6 +1500,17 @@ $("overlay-toggle").addEventListener("change", () => {
 });
 
 $("return-zero-mode").addEventListener("change", updateReturnZeroRateControl);
+$("initialization-mode").addEventListener("change", () => {
+  updateInitializationVisibility();
+  setMethodDirty();
+});
+for (const input of [
+  $("initialization-preload-force"),
+  $("initialization-rate"),
+  $("initialization-max-travel"),
+]) {
+  input.addEventListener("input", () => setMethodDirty());
+}
 $("load-method-button").addEventListener("click", openLoadMethodDialog);
 $("save-method-button").addEventListener("click", openSaveMethodDialog);
 $("save-method-name").addEventListener("input", updateSaveMethodMessage);
@@ -1492,6 +1576,7 @@ for (const button of document.querySelectorAll(".tab-button")) {
 document.addEventListener("visibilitychange", syncLiveChartVisibility);
 
 renderSteps();
+updateInitializationVisibility();
 renderMethodState();
 renderCalibrationPoints();
 updateMotionLabels();

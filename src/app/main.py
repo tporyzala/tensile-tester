@@ -84,8 +84,19 @@ RELATIVE_MOVE_AMOUNTS_MM = frozenset({-100.0, -10.0, -1.0, 1.0, 10.0, 100.0})
 RELATIVE_MOVE_STATIONARY_STEP_RATE_MAX_STEPS_S = 0.5
 RUN_KIND_NONE = "NONE"
 RUN_KIND_SPECIMEN = "SPECIMEN"
+RUN_KIND_INITIALIZATION = "INITIALIZATION"
 RUN_KIND_RETURN_ZERO = "RETURN_ZERO"
 RUN_KIND_RELATIVE_MOVE = "RELATIVE_MOVE"
+INITIALIZATION_MODE_NONE = "NONE"
+INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO = "PRELOAD_UNLOAD_ZERO_DISPLACEMENT"
+INITIALIZATION_MODES = {
+    INITIALIZATION_MODE_NONE,
+    INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+}
+INITIALIZATION_PRELOAD_FORCE_DEFAULT_N = 10.0
+INITIALIZATION_RATE_DEFAULT_MM_S = 0.02
+INITIALIZATION_MAX_TRAVEL_DEFAULT_MM = 2.0
+INITIALIZATION_HOLD_DURATION_S = 1.0
 CALIBRATION_SAMPLE_DURATION_S = 12.0
 CALIBRATION_SAMPLE_POLL_S = 0.02
 CALIBRATION_SAMPLE_MIN_COUNT = 20
@@ -168,11 +179,20 @@ class TestStep:
 
 
 @dataclass(slots=True)
+class TestInitialization:
+    mode: str = INITIALIZATION_MODE_NONE
+    preload_force_n: float = INITIALIZATION_PRELOAD_FORCE_DEFAULT_N
+    rate_mm_s: float = INITIALIZATION_RATE_DEFAULT_MM_S
+    max_travel_mm: float = INITIALIZATION_MAX_TRAVEL_DEFAULT_MM
+
+
+@dataclass(slots=True)
 class TestMethod:
     id: str
     name: str
     steps: list[TestStep]
     motion: dict[str, float] = field(default_factory=dict)
+    initialization: TestInitialization = field(default_factory=TestInitialization)
     schema_version: int = 1
     created_at: str = ""
     updated_at: str = ""
@@ -291,6 +311,7 @@ class TestMethodStore:
             name=parsed.name,
             steps=parsed.steps,
             motion=parsed.motion,
+            initialization=parsed.initialization,
             schema_version=1,
             created_at=created_at,
             updated_at=now,
@@ -316,6 +337,7 @@ class TestMethodStore:
             name=method.name,
             steps=method.steps,
             motion=method.motion,
+            initialization=method.initialization,
             schema_version=1,
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
@@ -403,6 +425,11 @@ class SerialMonitor:
         self._test_ack_future: asyncio.Future[None] | None = None
         self._test_ack_expected: tuple[str, int, int | None] | None = None
         self._test_heartbeat_task: asyncio.Task[None] | None = None
+        self._utility_completion_future: asyncio.Future[None] | None = None
+        self._utility_completion_error: TestCommandError | None = None
+        self._initialization_start_position_mm: float | None = None
+        self._initialization_max_travel_mm = 0.0
+        self._initialization_abort_requested = False
         self._sample_records: list[TestSampleRecord] = []
         self._active_sample: TestSampleMetadata | None = None
         self._active_method_snapshot: dict[str, object] = {}
@@ -721,6 +748,20 @@ class SerialMonitor:
         sample: TestSampleMetadata | None = None,
         method_snapshot: dict[str, object] | None = None,
     ) -> None:
+        frozen_method_snapshot = freeze_method_snapshot(method_snapshot, steps)
+        initialization = parse_method_initialization(
+            frozen_method_snapshot.get("initialization"))
+        if initialization.mode == INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO:
+            await self._run_preload_unload_zero_initialization(initialization)
+
+        await self._start_specimen_test(steps, sample, frozen_method_snapshot)
+
+    async def _start_specimen_test(
+        self,
+        steps: list[TestStep],
+        sample: TestSampleMetadata | None,
+        method_snapshot: dict[str, object],
+    ) -> None:
         async with self._command_lock:
             if self._serial is None:
                 raise TestCommandError("Arduino is disconnected; test was not started.")
@@ -738,7 +779,7 @@ class SerialMonitor:
             self._test_steps = list(steps)
             self._test_samples = []
             self._active_sample = sample
-            self._active_method_snapshot = freeze_method_snapshot(method_snapshot, steps)
+            self._active_method_snapshot = dict(method_snapshot)
             self._test_run_kind = RUN_KIND_SPECIMEN
             self._current_run_finalized = False
             self._test_state = TestRunState(
@@ -765,6 +806,109 @@ class SerialMonitor:
             self._test_state.phase = "RAMPING"
             self._test_state.message = f"Sample {sample.sample_id} running."
             self._ensure_test_heartbeat(run_id)
+
+    async def _run_preload_unload_zero_initialization(
+        self,
+        initialization: TestInitialization,
+    ) -> None:
+        completion = await self._start_initialization_utility_run(initialization)
+        await completion
+        async with self._command_lock:
+            if self._serial is None:
+                raise TestCommandError(
+                    "Arduino is disconnected; displacement was not zeroed.")
+            if self._test_blocks_setup_control():
+                raise TestCommandError(
+                    "Initialization did not return to setup before zeroing displacement.")
+            self.snapshot.last_message = "Zeroing displacement after initialization."
+            self._displacement_zero_pending_until = (
+                time.monotonic() + DISPLACEMENT_ZERO_ACK_TIMEOUT_S + 1.0)
+            try:
+                await self._send_displacement_zero_with_retries()
+            except DisplacementZeroCommandError as exc:
+                raise TestCommandError(str(exc)) from exc
+            self.clear_plot_data()
+
+    async def _start_initialization_utility_run(
+        self,
+        initialization: TestInitialization,
+    ) -> asyncio.Future[None]:
+        async with self._command_lock:
+            if self._serial is None:
+                raise TestCommandError(
+                    "Arduino is disconnected; initialization was not started.")
+            if self._test_blocks_setup_control():
+                raise TestCommandError(
+                    "Stop the active test before initializing the specimen.")
+
+            steps = self._initialization_steps(initialization)
+            run_id = self._allocate_test_run_id()
+            for index, step in enumerate(steps, start=1):
+                if len(self._test_step_line(run_id, index, step)) >= 90:
+                    raise TestCommandError(
+                        f"Initialization step {index} is too long for the Arduino serial command.")
+
+            loop = asyncio.get_running_loop()
+            completion: asyncio.Future[None] = loop.create_future()
+            self._utility_completion_future = completion
+            self._utility_completion_error = None
+            self._initialization_start_position_mm = self.snapshot.position_mm
+            self._initialization_max_travel_mm = initialization.max_travel_mm
+            self._initialization_abort_requested = False
+            self._test_steps = steps
+            self._active_sample = None
+            self._active_method_snapshot = {}
+            self._test_run_kind = RUN_KIND_INITIALIZATION
+            self._current_run_finalized = False
+            self._test_state = TestRunState(
+                run_id=run_id,
+                status="STARTING",
+                phase="STARTING",
+                step_count=len(steps),
+                message=(
+                    f"Initializing specimen to {initialization.preload_force_n:g} N preload."
+                ),
+                started_at=time.time(),
+            )
+
+            try:
+                await self._send_test_command_with_retries(
+                    f"START_TEST,{run_id},{len(steps)}",
+                    "START_TEST",
+                    run_id,
+                )
+                await self._send_test_step(1)
+            except TestCommandError as exc:
+                self._mark_test_fault("Arduino did not start specimen initialization.")
+                raise TestCommandError(
+                    "Arduino did not start specimen initialization.") from exc
+
+            self._test_state.status = "RUNNING"
+            self._test_state.phase = "RAMPING"
+            self._test_state.message = "Initializing specimen preload."
+            self._ensure_test_heartbeat(run_id)
+            return completion
+
+    def _initialization_steps(
+        self,
+        initialization: TestInitialization,
+    ) -> list[TestStep]:
+        return [
+            TestStep(
+                target_type="FORCE",
+                target_value=initialization.preload_force_n,
+                rate_type="DISPLACEMENT",
+                rate_value_per_s=initialization.rate_mm_s,
+                hold_duration_s=INITIALIZATION_HOLD_DURATION_S,
+            ),
+            TestStep(
+                target_type="FORCE",
+                target_value=0.0,
+                rate_type="DISPLACEMENT",
+                rate_value_per_s=initialization.rate_mm_s,
+                hold_duration_s=INITIALIZATION_HOLD_DURATION_S,
+            ),
+        ]
 
     async def return_to_zero(self, request: ReturnZeroRequest) -> None:
         async with self._command_lock:
@@ -1286,6 +1430,7 @@ class SerialMonitor:
         if record_plot_point:
             self._record_plot_point(machine)
         self._apply_test_telemetry(machine)
+        self._check_initialization_travel_limit(machine)
 
     def _record_plot_point(self, machine: MachinePayload) -> None:
         if self._plot_start_controller_time_ms is None:
@@ -1359,6 +1504,51 @@ class SerialMonitor:
         elif machine.test_phase == "FAULTED":
             reason = machine.fault_reason if machine.fault_reason != "NONE" else "UNKNOWN"
             self._mark_test_fault(f"Automated test fault: {reason}.")
+
+    def _check_initialization_travel_limit(self, machine: MachinePayload) -> None:
+        if (
+            self._test_run_kind != RUN_KIND_INITIALIZATION
+            or self._initialization_start_position_mm is None
+            or self._initialization_abort_requested
+            or machine.test_run_id != self._test_state.run_id
+            or self._test_state.status not in {"STARTING", "RUNNING", "PAUSED", "WAITING_NEXT"}
+        ):
+            return
+
+        travel_mm = abs(machine.position_mm - self._initialization_start_position_mm)
+        if travel_mm <= self._initialization_max_travel_mm:
+            return
+
+        message = (
+            "Initialization exceeded max travel of "
+            f"{self._initialization_max_travel_mm:g} mm before reaching preload."
+        )
+        self._initialization_abort_requested = True
+        self._utility_completion_error = TestCommandError(message)
+        asyncio.create_task(
+            self._stop_initialization_after_travel_limit(self._test_state.run_id, message))
+
+    async def _stop_initialization_after_travel_limit(
+        self,
+        run_id: int,
+        message: str,
+    ) -> None:
+        async with self._command_lock:
+            if self._test_run_kind != RUN_KIND_INITIALIZATION or run_id != self._test_state.run_id:
+                return
+            self._utility_completion_error = TestCommandError(message)
+            self._test_state.message = message
+            if self._serial is None:
+                self._mark_test_fault(message)
+                return
+            try:
+                await self._send_test_command_with_retries(
+                    f"STOP_TEST,{run_id}",
+                    "STOP_TEST",
+                    run_id,
+                )
+            except TestCommandError:
+                self._mark_test_fault(message)
 
     def _apply_ack(self, parts: list[str]) -> None:
         command = parts[1].upper()
@@ -1616,14 +1806,36 @@ class SerialMonitor:
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
 
+    def _complete_utility_run(self, error: TestCommandError | None = None) -> None:
+        future = self._utility_completion_future
+        if future is not None and not future.done():
+            if error is None:
+                future.set_result(None)
+            else:
+                future.set_exception(error)
+        self._utility_completion_future = None
+        self._utility_completion_error = None
+        self._initialization_start_position_mm = None
+        self._initialization_max_travel_mm = 0.0
+        self._initialization_abort_requested = False
+
     def _mark_test_complete(self) -> None:
+        was_initialization = self._test_run_kind == RUN_KIND_INITIALIZATION
         was_return_zero = self._test_run_kind == RUN_KIND_RETURN_ZERO
         was_relative_move = self._test_run_kind == RUN_KIND_RELATIVE_MOVE
         self._finalize_active_sample("COMPLETE")
         self._test_state.status = "COMPLETE"
         self._test_state.phase = "COMPLETE"
         self._test_state.finished_at = self._test_state.finished_at or time.time()
-        if was_return_zero:
+        if was_initialization:
+            error = self._utility_completion_error
+            if error is None:
+                self._test_state.message = "Specimen initialization complete."
+                self._complete_utility_run()
+            else:
+                self._test_state.message = str(error)
+                self._complete_utility_run(error)
+        elif was_return_zero:
             self._test_state.message = "Return to zero complete."
         elif was_relative_move:
             self._test_state.message = "Relative move complete."
@@ -1634,10 +1846,16 @@ class SerialMonitor:
         self._clear_active_run_context()
 
     def _mark_test_stopped(self) -> None:
+        was_initialization = self._test_run_kind == RUN_KIND_INITIALIZATION
         was_return_zero = self._test_run_kind == RUN_KIND_RETURN_ZERO
         was_relative_move = self._test_run_kind == RUN_KIND_RELATIVE_MOVE
         self._finalize_active_sample("STOPPED")
-        if was_return_zero:
+        if was_initialization:
+            error = self._utility_completion_error or TestCommandError(
+                "Specimen initialization was stopped.")
+            message = str(error)
+            self._complete_utility_run(error)
+        elif was_return_zero:
             message = "Return to zero stopped; controller returned to idle."
         elif was_relative_move:
             message = "Relative move stopped; controller returned to idle."
@@ -1674,6 +1892,7 @@ class SerialMonitor:
         self.snapshot.updated_at = time.time()
 
     def _mark_test_fault(self, message: str) -> None:
+        was_initialization = self._test_run_kind == RUN_KIND_INITIALIZATION
         should_log = self._test_state.status != "FAULT" or self._test_state.message != message
         self._finalize_active_sample("FAULT")
         self._test_state.status = "FAULT"
@@ -1681,6 +1900,8 @@ class SerialMonitor:
         self._test_state.message = message
         self._test_state.finished_at = self._test_state.finished_at or time.time()
         self._stop_test_heartbeat()
+        if was_initialization:
+            self._complete_utility_run(TestCommandError(message))
         self._clear_active_run_context()
         if should_log:
             self._log_serial("SYS", message)
@@ -2037,6 +2258,41 @@ def parse_method_motion(raw_motion: object) -> dict[str, float]:
     return parsed
 
 
+def parse_method_initialization(raw_initialization: object) -> TestInitialization:
+    raw = raw_initialization if isinstance(raw_initialization, dict) else {}
+    mode = str(raw.get("mode") or INITIALIZATION_MODE_NONE).strip().upper()
+    if mode not in INITIALIZATION_MODES:
+        raise ValueError("Initialization mode is not valid.")
+    if mode == INITIALIZATION_MODE_NONE:
+        return TestInitialization()
+
+    preload_force_n = parse_finite_float(
+        raw.get("preload_force_n", INITIALIZATION_PRELOAD_FORCE_DEFAULT_N),
+        "Initialization preload force",
+    )
+    rate_mm_s = parse_finite_float(
+        raw.get("rate_mm_s", INITIALIZATION_RATE_DEFAULT_MM_S),
+        "Initialization rate",
+    )
+    max_travel_mm = parse_finite_float(
+        raw.get("max_travel_mm", INITIALIZATION_MAX_TRAVEL_DEFAULT_MM),
+        "Initialization max travel",
+    )
+    if preload_force_n == 0.0:
+        raise ValueError("Initialization preload force cannot be zero.")
+    if rate_mm_s <= 0.0:
+        raise ValueError("Initialization rate must be greater than zero.")
+    if max_travel_mm <= 0.0:
+        raise ValueError("Initialization max travel must be greater than zero.")
+
+    return TestInitialization(
+        mode=mode,
+        preload_force_n=preload_force_n,
+        rate_mm_s=rate_mm_s,
+        max_travel_mm=max_travel_mm,
+    )
+
+
 def parse_test_method(payload: dict[str, object]) -> TestMethod:
     if not isinstance(payload, dict):
         raise ValueError("Method payload is not valid.")
@@ -2046,6 +2302,7 @@ def parse_test_method(payload: dict[str, object]) -> TestMethod:
         name=name,
         steps=parse_test_steps(payload),
         motion=parse_method_motion(payload.get("motion")),
+        initialization=parse_method_initialization(payload.get("initialization")),
         schema_version=1,
         created_at=str(payload.get("created_at") or ""),
         updated_at=str(payload.get("updated_at") or ""),
@@ -2059,6 +2316,7 @@ def method_to_public(method: TestMethod) -> dict[str, object]:
         "name": method.name,
         "steps": [asdict(step) for step in method.steps],
         "motion": dict(method.motion),
+        "initialization": asdict(method.initialization),
     }
     return {
         **stable,
@@ -2093,6 +2351,7 @@ def parse_run_method_snapshot(
         "name": name,
         "steps": [asdict(step) for step in steps],
         "motion": parse_method_motion(raw.get("motion")),
+        "initialization": asdict(parse_method_initialization(raw.get("initialization"))),
     }
     snapshot["hash"] = method_hash(snapshot)
     return snapshot

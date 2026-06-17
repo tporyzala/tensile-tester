@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tensile Tester Test</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260616-methods">
+  <link rel="stylesheet" href="/static/styles.css?v=20260617-initialization">
   <script src="/static/vendor/plotly-basic-3.5.1.min.js" defer></script>
   <script src="/static/live-charts.js?v=20260616-chart-lines" defer></script>
-  <script src="/static/test.js?v=20260617-motion-units" defer></script>
+  <script src="/static/test.js?v=20260617-initialization" defer></script>
 </head>
 <body>
   <div class="app-shell">
@@ -150,6 +150,29 @@
             <span class="label">Method</span>
             <strong id="method-name">Unsaved Method</strong>
             <span id="method-dirty" class="method-dirty" hidden>Unsaved changes</span>
+          </div>
+          <div class="initialization-panel" aria-label="Test initialization">
+            <label class="field-control">
+              <span class="label">Initialization</span>
+              <select id="initialization-mode" class="table-input">
+                <option value="NONE">None</option>
+                <option value="PRELOAD_UNLOAD_ZERO_DISPLACEMENT">Preload, unload, zero displacement</option>
+              </select>
+            </label>
+            <div id="initialization-fields" class="initialization-fields" hidden>
+              <label class="field-control">
+                <span class="label">Preload Force (N)</span>
+                <input id="initialization-preload-force" class="table-input" type="number" step="0.1" value="10">
+              </label>
+              <label class="field-control">
+                <span class="label">Rate (mm/s)</span>
+                <input id="initialization-rate" class="table-input" type="number" min="0.0001" step="0.001" value="0.02">
+              </label>
+              <label class="field-control">
+                <span class="label">Max Travel (mm)</span>
+                <input id="initialization-max-travel" class="table-input" type="number" min="0.001" step="0.1" value="2">
+              </label>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="step-table">

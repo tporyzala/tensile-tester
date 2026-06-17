@@ -8,13 +8,17 @@ from unittest.mock import AsyncMock, Mock
 
 from app.main import (
     AppConfig,
+    INITIALIZATION_MODE_NONE,
+    INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
     RETURN_ZERO_DISPLACEMENT_DEFAULT_RATE_MM_S,
     ReturnZeroRequest,
+    RUN_KIND_INITIALIZATION,
     RUN_KIND_RELATIVE_MOVE,
     RUN_KIND_SPECIMEN,
     SerialMonitor,
     STEPS_PER_MM,
     TEST_SPEED_DEFAULT,
+    TestCommandError,
     TestMethodStore,
     TestRunState,
     TestSampleMetadata,
@@ -68,13 +72,22 @@ def telemetry(force, position):
     }
 
 
-def telemetry_line(seq, controller_ms, force, position):
+def telemetry_line(
+    seq,
+    controller_ms,
+    force,
+    position,
+    run_id=7,
+    step_index=1,
+    step_count=1,
+    phase="RAMPING",
+):
     fields = [
         "TEL",
         seq,
         controller_ms,
         "TESTING",
-        "RAMPING",
+        phase,
         "NONE",
         "123",
         force,
@@ -86,9 +99,9 @@ def telemetry_line(seq, controller_ms, force, position):
         "4000.00",
         "10000.00",
         str(TEST_SPEED_DEFAULT),
-        "7",
-        "1",
-        "1",
+        run_id,
+        step_index,
+        step_count,
         "FORCE",
         "10.0000",
         "0.00000",
@@ -185,12 +198,23 @@ class MultiSampleTests(unittest.TestCase):
                     "test_max_step_rate_steps_s": 1200.0,
                     "acceleration_steps_s2": 5000.0,
                 },
+                "initialization": {
+                    "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+                    "preload_force_n": -10.0,
+                    "rate_mm_s": 0.02,
+                    "max_travel_mm": 2.0,
+                },
             })
 
             self.assertEqual(saved["id"], "tpu-pull-v1")
             self.assertEqual(saved["name"], "TPU Pull v1")
             self.assertEqual(saved["steps"][0]["target_value"], 50.0)
             self.assertEqual(saved["motion"]["jog_speed_steps_s"], 500.0)
+            self.assertEqual(
+                saved["initialization"]["mode"],
+                INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+            )
+            self.assertEqual(saved["initialization"]["preload_force_n"], -10.0)
 
             listed = store.list_methods()
             self.assertEqual([method["id"] for method in listed], ["tpu-pull-v1"])
@@ -199,6 +223,7 @@ class MultiSampleTests(unittest.TestCase):
             loaded = store.get_method("tpu-pull-v1")
             self.assertEqual(loaded["name"], "TPU Pull v1")
             self.assertEqual(loaded["hash"], saved["hash"])
+            self.assertEqual(loaded["initialization"]["rate_mm_s"], 0.02)
 
             updated = store.save_method({
                 "name": "TPU Pull v1",
@@ -222,6 +247,23 @@ class MultiSampleTests(unittest.TestCase):
         })
         self.assertEqual(parsed.name, "Compression")
         self.assertEqual(parsed.steps[0].target_value, -25.0)
+        self.assertEqual(parsed.initialization.mode, INITIALIZATION_MODE_NONE)
+
+        parsed_disabled_initialization = parse_test_method({
+            "name": "No Init",
+            "steps": [step_payload()],
+            "motion": {},
+            "initialization": {
+                "mode": INITIALIZATION_MODE_NONE,
+                "preload_force_n": 0,
+                "rate_mm_s": 0,
+                "max_travel_mm": 0,
+            },
+        })
+        self.assertEqual(
+            parsed_disabled_initialization.initialization.preload_force_n,
+            10.0,
+        )
 
         with self.assertRaises(ValueError):
             parse_test_method({
@@ -236,6 +278,22 @@ class MultiSampleTests(unittest.TestCase):
                 "steps": [step_payload()],
                 "motion": {"jog_speed_steps_s": -1},
             })
+
+        invalid_initializations = [
+            {"mode": "BAD_MODE"},
+            {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "preload_force_n": 0},
+            {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "rate_mm_s": 0},
+            {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "max_travel_mm": 0},
+        ]
+        for initialization in invalid_initializations:
+            with self.subTest(initialization=initialization):
+                with self.assertRaises(ValueError):
+                    parse_test_method({
+                        "name": "Bad Initialization",
+                        "steps": [step_payload()],
+                        "motion": {},
+                        "initialization": initialization,
+                    })
 
     def test_plot_data_retains_all_periodic_telemetry_until_clear(self):
         monitor = SerialMonitor(AppConfig())
@@ -386,6 +444,122 @@ class MultiSampleTests(unittest.TestCase):
         )
         monitor._send_test_step.assert_awaited_once_with(1)
         monitor._ensure_test_heartbeat.assert_called_once_with(1)
+
+    def test_initialization_runs_before_specimen_start(self):
+        async def run_test():
+            monitor = SerialMonitor(AppConfig())
+            monitor._serial = object()
+            monitor.snapshot.position_mm = 1.25
+            monitor._plot_points = [{"index": 1}]
+            monitor._plot_point_index = 1
+            monitor._send_test_command_with_retries = AsyncMock()
+            monitor._send_displacement_zero_with_retries = AsyncMock()
+            monitor._ensure_test_heartbeat = Mock()
+
+            task = asyncio.create_task(monitor.start_test(
+                [step(100.0)],
+                TestSampleMetadata("A-1"),
+                {
+                    "name": "Initialized Pull",
+                    "steps": [step_payload(100.0)],
+                    "motion": {},
+                    "initialization": {
+                        "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+                        "preload_force_n": 10.0,
+                        "rate_mm_s": 0.02,
+                        "max_travel_mm": 2.0,
+                    },
+                },
+            ))
+            await asyncio.sleep(0)
+
+            self.assertEqual(monitor._test_run_kind, RUN_KIND_INITIALIZATION)
+            self.assertEqual(len(monitor._test_steps), 2)
+            self.assertEqual(monitor._test_steps[0].target_value, 10.0)
+            self.assertEqual(monitor._test_steps[0].rate_type, "DISPLACEMENT")
+            self.assertEqual(monitor._test_steps[1].target_value, 0.0)
+            initialization_run_id = monitor._test_state.run_id
+
+            monitor._apply_event(["EVT", "STEP_COMPLETE", str(initialization_run_id), "1"])
+            await asyncio.sleep(0)
+            monitor._apply_event(["EVT", "TEST_COMPLETE", str(initialization_run_id)])
+            await task
+
+            monitor._send_displacement_zero_with_retries.assert_awaited_once()
+            self.assertEqual(monitor._plot_points, [])
+            self.assertEqual(monitor._plot_point_index, 0)
+            self.assertEqual(monitor._plot_reset_id, 1)
+            self.assertEqual(monitor._test_run_kind, RUN_KIND_SPECIMEN)
+            self.assertEqual(monitor._active_sample.sample_id, "A-1")
+            self.assertEqual(
+                monitor._active_method_snapshot["initialization"]["mode"],
+                INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+            )
+            self.assertEqual(monitor._sample_records, [])
+            command_names = [
+                call.args[1]
+                for call in monitor._send_test_command_with_retries.await_args_list
+            ]
+            self.assertEqual(
+                command_names,
+                ["START_TEST", "TEST_STEP", "TEST_STEP", "START_TEST", "TEST_STEP"],
+            )
+
+        asyncio.run(run_test())
+
+    def test_initialization_max_travel_abort_prevents_specimen_start(self):
+        async def run_test():
+            monitor = SerialMonitor(AppConfig())
+            monitor._serial = object()
+            monitor.snapshot.position_mm = 0.0
+            monitor._send_test_command_with_retries = AsyncMock()
+            monitor._send_displacement_zero_with_retries = AsyncMock()
+            monitor._ensure_test_heartbeat = Mock()
+
+            task = asyncio.create_task(monitor.start_test(
+                [step(100.0)],
+                TestSampleMetadata("A-1"),
+                {
+                    "name": "Initialized Pull",
+                    "steps": [step_payload(100.0)],
+                    "motion": {},
+                    "initialization": {
+                        "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+                        "preload_force_n": 10.0,
+                        "rate_mm_s": 0.02,
+                        "max_travel_mm": 0.5,
+                    },
+                },
+            ))
+            await asyncio.sleep(0)
+
+            initialization_run_id = monitor._test_state.run_id
+            monitor._apply_line(telemetry_line(
+                1,
+                1000,
+                1.0,
+                0.75,
+                run_id=initialization_run_id,
+                step_count=2,
+            ))
+            await asyncio.sleep(0)
+            monitor._apply_event(["EVT", "TEST_STOPPED", str(initialization_run_id)])
+
+            with self.assertRaises(TestCommandError) as raised:
+                await task
+
+            self.assertIn("exceeded max travel", str(raised.exception))
+            monitor._send_displacement_zero_with_retries.assert_not_awaited()
+            self.assertEqual(monitor._sample_records, [])
+            self.assertEqual(monitor._test_run_kind, "NONE")
+            command_names = [
+                call.args[1]
+                for call in monitor._send_test_command_with_retries.await_args_list
+            ]
+            self.assertEqual(command_names[-1], "STOP_TEST")
+            self.assertNotIn("START_TEST", command_names[3:])
+
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":

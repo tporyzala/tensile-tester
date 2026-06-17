@@ -228,6 +228,26 @@ h2 {
   font-weight: 800;
 }
 
+.initialization-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e1e6e9;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #ffffff;
+}
+
+.initialization-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.initialization-fields[hidden] {
+  display: none;
+}
+
 .machine-panel,
 .charts-panel {
   min-width: 0;
@@ -931,6 +951,7 @@ input[type="range"] {
   .sample-run-controls,
   .return-zero-controls,
   .calibration-capture-controls,
+  .initialization-fields,
   .calibration-results-grid {
     grid-template-columns: 1fr;
   }

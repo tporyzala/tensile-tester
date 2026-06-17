@@ -273,6 +273,8 @@ Target and rate types are independent. For example, a step can move at `0.02 mm/
 
 The step table and motion settings can be saved as named test methods. The save icon opens a name prompt; saving with the same sanitized name overwrites that method, while saving with a new name creates a new method. The load icon opens a scrollable method picker. Loaded methods remain editable before running, and can be saved back to the same method or saved under a new name. Method files are JSON documents stored in `data/test-methods` by default; set `TENSILE_METHOD_DIR` to use another directory.
 
+Methods can optionally run a preload initialization before the specimen sample starts. The preload/unload/zero mode moves at the configured initialization rate until the signed preload force is reached, unloads to `0 N`, holds each point for 1 second, sends `ZERO_DISPLACEMENT`, clears the live plot buffer, then starts the real test steps. Initialization telemetry is a utility run and is not archived as specimen data. The max-travel setting aborts initialization if the preload force is not reached within that displacement window.
+
 Each sample has a sample ID and optional notes. The default sample ID increments as `Sample 1`, `Sample 2`, and so on. Sample IDs are limited to 64 characters and notes are limited to 200 characters.
 
 Completed samples are included by default. Stopped or faulted samples are retained in the sample set but excluded from overlays until the operator includes them. The sample table shows index, ID, status, method, point count, peak force, final displacement, include/exclude state, and notes.
@@ -289,7 +291,7 @@ The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route
 
 The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, relative move, or faulted run is active.
 
-Live plots do not clear automatically when a new sample starts or finishes. Use the Live Plots Clear button to clear the plot buffer and reset the chart view. Clearing the plots does not delete retained specimen samples or XLSX export data.
+Live plots do not clear automatically when a new sample starts or finishes, except after a successful preload initialization so the real test starts visually from the new displacement zero. Use the Live Plots Clear button to clear the plot buffer and reset the chart view. Clearing the plots does not delete retained specimen samples or XLSX export data.
 
 ## Return To Zero
 
