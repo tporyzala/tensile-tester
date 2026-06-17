@@ -289,6 +289,8 @@ The live charts are rendered with the vendored Plotly basic bundle. The Python a
 
 The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the automatic sample number, with Excel-invalid worksheet characters replaced and duplicate names made unique. Telemetry columns and simple numeric metadata are written as spreadsheet numbers, while sample IDs, notes, statuses, and method metadata remain text. The workbook includes the method ID, method name, method hash, and full method snapshot used when that sample started.
 
+The Save Set and Open Set buttons persist and reload the current Sample Set as JSON. Saved sets include finalized sample records, editable notes, include flags, full retained specimen telemetry, the per-sample method snapshots, and the current editable method snapshot. Opening a set replaces the current in-memory Sample Set, reloads that editable method into the step table so more samples can be appended, and is rejected while a test, return-to-zero move, relative move, or faulted run is active. Set files are stored in `data/test-sets` by default; set `TENSILE_SAMPLE_SET_DIR` to use another directory.
+
 The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, relative move, or faulted run is active.
 
 Live plots do not clear automatically when a new sample starts or finishes, except after a successful preload initialization so the real test starts visually from the new displacement zero. Use the Live Plots Clear button to clear the plot buffer and reset the chart view. Clearing the plots does not delete retained specimen samples or XLSX export data.
@@ -419,6 +421,10 @@ Automated-test API:
 
 ```text
 GET  /api/test/state
+GET  /api/test/sample-sets
+GET  /api/test/sample-sets/{sample_set_id}
+POST /api/test/sample-sets
+POST /api/test/sample-sets/{sample_set_id}/open
 POST /api/test/start
 POST /api/test/return-zero
 POST /api/test/move-relative

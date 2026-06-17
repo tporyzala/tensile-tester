@@ -32,6 +32,7 @@ SetupCommandResult = TypeVar("SetupCommandResult")
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_METHOD_DIR = PROJECT_DIR / "data" / "test-methods"
+DEFAULT_SAMPLE_SET_DIR = PROJECT_DIR / "data" / "test-sets"
 DEFAULT_SERIAL_PORT = "COM3" if platform.system(
 ).lower().startswith("win") else "/dev/ttyACM0"
 
@@ -69,6 +70,7 @@ TEST_RATE_TYPES = {"FORCE", "DISPLACEMENT"}
 SERIAL_LOG_DEFAULT_MAX_LINES = 500
 SAMPLE_ID_MAX_LENGTH = 64
 SAMPLE_NOTES_MAX_LENGTH = 200
+SAMPLE_SET_NAME_MAX_LENGTH = 80
 SAMPLE_WORKBOOK_FIELDNAMES = [
     "wall_time_s",
     "controller_time_ms",
@@ -139,6 +141,8 @@ class AppConfig:
     serial_log_max_lines: int = int(
         os.getenv("TENSILE_SERIAL_LOG_MAX_LINES", str(SERIAL_LOG_DEFAULT_MAX_LINES)))
     method_dir: Path = Path(os.getenv("TENSILE_METHOD_DIR", str(DEFAULT_METHOD_DIR)))
+    sample_set_dir: Path = Path(
+        os.getenv("TENSILE_SAMPLE_SET_DIR", str(DEFAULT_SAMPLE_SET_DIR)))
 
 
 @dataclass(slots=True)
@@ -270,6 +274,17 @@ class TestSampleRecord:
 
 
 @dataclass(slots=True)
+class TestSampleSet:
+    id: str
+    name: str
+    samples: list[TestSampleRecord]
+    method_snapshot: dict[str, object] = field(default_factory=dict)
+    schema_version: int = 1
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
 class ReturnZeroRequest:
     mode: str
     rate_value_per_s: float
@@ -380,6 +395,102 @@ class TestMethodStore:
             "updated_at": method.updated_at,
             "hash": method_hash(method_to_public(method)),
         }
+
+
+class TestSampleSetStore:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def list_sample_sets(self) -> list[dict[str, object]]:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        sample_sets: list[dict[str, object]] = []
+        for path in sorted(self.directory.glob("*.json")):
+            try:
+                sample_set = self._load_path(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            sample_sets.append(self._summary(sample_set))
+        return sorted(
+            sample_sets,
+            key=lambda item: str(item.get("updated_at") or ""),
+            reverse=True,
+        )
+
+    def get_sample_set(self, sample_set_id: str) -> TestSampleSet:
+        return self._load_path(self._path_for_id(sample_set_id))
+
+    def save_sample_set(
+        self,
+        name: str,
+        records: list[TestSampleRecord],
+        method_snapshot: object = None,
+    ) -> TestSampleSet:
+        parsed_name = parse_sample_set_name(name)
+        if not records:
+            raise ValueError("Sample set has no samples to save.")
+        parsed_method_snapshot = parse_sample_set_method_snapshot(
+            method_snapshot,
+            records,
+        )
+
+        now = utc_timestamp()
+        sample_set_id = sample_set_id_from_name(parsed_name)
+        path = self._path_for_id(sample_set_id)
+        created_at = now
+        if path.exists():
+            try:
+                existing = self._load_path(path)
+                created_at = existing.created_at or now
+            except (OSError, ValueError, json.JSONDecodeError):
+                created_at = now
+
+        sample_set = TestSampleSet(
+            id=sample_set_id,
+            name=parsed_name,
+            samples=[copy_sample_record(record) for record in records],
+            method_snapshot=parsed_method_snapshot,
+            schema_version=1,
+            created_at=created_at,
+            updated_at=now,
+        )
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"{json.dumps(sample_set_to_public(sample_set), indent=2)}\n",
+            encoding="utf-8",
+        )
+        return sample_set
+
+    def _path_for_id(self, sample_set_id: str) -> Path:
+        parsed = parse_sample_set_id(sample_set_id)
+        return self.directory / f"{parsed}.json"
+
+    def _load_path(self, path: Path) -> TestSampleSet:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Sample set file must contain an object.")
+        name = parse_sample_set_name(data.get("name"))
+        raw_samples = data.get("samples")
+        if not isinstance(raw_samples, list):
+            raise ValueError("Sample set samples must be a list.")
+        samples = [
+            parse_sample_record(raw_sample, fallback_index=index)
+            for index, raw_sample in enumerate(raw_samples, start=1)
+        ]
+        return TestSampleSet(
+            id=parse_sample_set_id(data.get("id") or sample_set_id_from_name(name)),
+            name=name,
+            samples=samples,
+            method_snapshot=parse_sample_set_method_snapshot(
+                data.get("method_snapshot"),
+                samples,
+            ),
+            schema_version=1,
+            created_at=str(data.get("created_at") or ""),
+            updated_at=str(data.get("updated_at") or ""),
+        )
+
+    def _summary(self, sample_set: TestSampleSet) -> dict[str, object]:
+        return sample_set_summary(sample_set)
 
 
 def parse_machine_payload(payload: list[str]) -> MachinePayload:
@@ -591,6 +702,29 @@ class SerialMonitor:
         self._test_steps = []
         self._test_samples = []
         self._test_state = TestRunState()
+
+    def saved_sample_records(self) -> list[TestSampleRecord]:
+        if self._test_blocks_setup_control():
+            raise TestCommandError(
+                "Stop the active test before saving the sample set.")
+        return [copy_sample_record(record) for record in self._sample_records]
+
+    def replace_sample_set(self, sample_set: TestSampleSet) -> None:
+        if self._test_blocks_setup_control():
+            raise TestCommandError(
+                "Stop the active test before opening a saved sample set.")
+        self._sample_records = [
+            copy_sample_record(record)
+            for record in sample_set.samples
+        ]
+        self._active_sample = None
+        self._active_method_snapshot = {}
+        self._test_run_kind = RUN_KIND_NONE
+        self._current_run_finalized = False
+        self._test_steps = []
+        self._test_samples = []
+        self._test_state = TestRunState(
+            message=f"Opened sample set \"{sample_set.name}\".")
 
     def set_sample_included(self, sample_index: int, included: bool) -> None:
         for record in self._sample_records:
@@ -1959,6 +2093,7 @@ config = AppConfig()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.method_store = TestMethodStore(config.method_dir)
+    app.state.sample_set_store = TestSampleSetStore(config.sample_set_dir)
     app.state.monitor = SerialMonitor(config)
     await app.state.monitor.start()
     try:
@@ -2096,6 +2231,51 @@ async def save_test_method(request: Request) -> JSONResponse:
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse(method)
+
+
+@app.get("/api/test/sample-sets")
+async def list_test_sample_sets(request: Request) -> JSONResponse:
+    return JSONResponse({
+        "sample_sets": request.app.state.sample_set_store.list_sample_sets(),
+    })
+
+
+@app.get("/api/test/sample-sets/{sample_set_id}")
+async def get_test_sample_set(request: Request, sample_set_id: str) -> JSONResponse:
+    try:
+        sample_set = request.app.state.sample_set_store.get_sample_set(sample_set_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Sample set was not found.") from exc
+    return JSONResponse(sample_set_to_public(sample_set))
+
+
+@app.post("/api/test/sample-sets")
+async def save_test_sample_set(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        name = parse_sample_set_name(body.get("name"))
+        records = request.app.state.monitor.saved_sample_records()
+        sample_set = request.app.state.sample_set_store.save_sample_set(
+            name,
+            records,
+            body.get("method_snapshot"),
+        )
+    except (OSError, ValueError, TestCommandError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(sample_set_to_public(sample_set))
+
+
+@app.post("/api/test/sample-sets/{sample_set_id}/open")
+async def open_test_sample_set(request: Request, sample_set_id: str) -> JSONResponse:
+    try:
+        sample_set = request.app.state.sample_set_store.get_sample_set(sample_set_id)
+        request.app.state.monitor.replace_sample_set(sample_set)
+    except (OSError, ValueError, json.JSONDecodeError, TestCommandError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    data = request.app.state.monitor.public_test_state()
+    data["opened_sample_set"] = sample_set_summary(sample_set)
+    data["method_snapshot"] = dict(sample_set.method_snapshot)
+    return JSONResponse(data)
 
 
 @app.post("/api/test/start")
@@ -2240,15 +2420,30 @@ def utc_timestamp() -> str:
 
 
 def method_id_from_name(name: str) -> str:
+    return slug_id_from_name(name, "method")
+
+
+def sample_set_id_from_name(name: str) -> str:
+    return slug_id_from_name(name, "sample-set")
+
+
+def slug_id_from_name(name: str, fallback: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     slug = slug[:64].strip("-")
-    return slug or "method"
+    return slug or fallback
 
 
 def parse_method_id(value: object) -> str:
     parsed = str(value or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", parsed):
         raise ValueError("Method ID is not valid.")
+    return parsed
+
+
+def parse_sample_set_id(value: object) -> str:
+    parsed = str(value or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", parsed):
+        raise ValueError("Sample set ID is not valid.")
     return parsed
 
 
@@ -2259,6 +2454,16 @@ def parse_method_name(value: object) -> str:
     if len(parsed) > METHOD_NAME_MAX_LENGTH:
         raise ValueError(
             f"Method name cannot exceed {METHOD_NAME_MAX_LENGTH} characters.")
+    return parsed
+
+
+def parse_sample_set_name(value: object) -> str:
+    parsed = str(value or "").strip()
+    if not parsed:
+        raise ValueError("Sample set name is required.")
+    if len(parsed) > SAMPLE_SET_NAME_MAX_LENGTH:
+        raise ValueError(
+            f"Sample set name cannot exceed {SAMPLE_SET_NAME_MAX_LENGTH} characters.")
     return parsed
 
 
@@ -2366,6 +2571,67 @@ def method_to_public(method: TestMethod) -> dict[str, object]:
     }
 
 
+def sample_set_to_public(sample_set: TestSampleSet) -> dict[str, object]:
+    return {
+        "schema_version": sample_set.schema_version,
+        "id": sample_set.id,
+        "name": sample_set.name,
+        "sample_count": len(sample_set.samples),
+        "method_snapshot": dict(sample_set.method_snapshot),
+        "samples": [
+            sample_record_to_public(record)
+            for record in sample_set.samples
+        ],
+        "created_at": sample_set.created_at,
+        "updated_at": sample_set.updated_at,
+    }
+
+
+def sample_set_summary(sample_set: TestSampleSet) -> dict[str, object]:
+    return {
+        "id": sample_set.id,
+        "name": sample_set.name,
+        "sample_count": len(sample_set.samples),
+        "created_at": sample_set.created_at,
+        "updated_at": sample_set.updated_at,
+    }
+
+
+def sample_record_to_public(record: TestSampleRecord) -> dict[str, object]:
+    return asdict(record)
+
+
+def copy_sample_record(record: TestSampleRecord) -> TestSampleRecord:
+    return parse_sample_record(sample_record_to_public(record), record.index)
+
+
+def parse_sample_set_method_snapshot(
+    raw_snapshot: object,
+    records: list[TestSampleRecord],
+) -> dict[str, object]:
+    raw = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+    if not raw:
+        for record in reversed(records):
+            if record.method_snapshot:
+                return dict(record.method_snapshot)
+        return {}
+
+    steps = parse_test_steps(raw)
+    name = parse_method_name(raw.get("name") or "Unsaved Method")
+    raw_id = str(raw.get("id") or "").strip()
+    method_id = parse_method_id(raw_id) if raw_id else method_id_from_name(name)
+    snapshot = {
+        "schema_version": 1,
+        "id": method_id,
+        "name": name,
+        "steps": [asdict(step) for step in steps],
+        "motion": parse_method_motion(raw.get("motion")),
+        "initialization": asdict(parse_method_initialization(raw.get("initialization"))),
+    }
+    snapshot["hash"] = method_hash(snapshot)
+    return snapshot
+
+
 def method_hash(snapshot: dict[str, object]) -> str:
     stable = {
         key: value
@@ -2462,6 +2728,68 @@ def parse_sample_notes(value: object) -> str:
     return notes
 
 
+def parse_sample_record(raw_record: object, fallback_index: int) -> TestSampleRecord:
+    if not isinstance(raw_record, dict):
+        raise ValueError("Sample record is not valid.")
+    raw_samples = raw_record.get("samples", [])
+    if not isinstance(raw_samples, list):
+        raise ValueError("Sample telemetry must be a list.")
+    samples: list[dict[str, object]] = []
+    for raw_sample in raw_samples:
+        if not isinstance(raw_sample, dict):
+            raise ValueError("Sample telemetry rows must be objects.")
+        samples.append(dict(raw_sample))
+
+    sample_id = str(raw_record.get("sample_id") or f"Sample {fallback_index}").strip()
+    if not sample_id:
+        sample_id = f"Sample {fallback_index}"
+    if len(sample_id) > SAMPLE_ID_MAX_LENGTH:
+        raise ValueError(
+            f"Sample ID cannot exceed {SAMPLE_ID_MAX_LENGTH} characters.")
+
+    raw_method_snapshot = raw_record.get("method_snapshot")
+    method_snapshot = (
+        dict(raw_method_snapshot)
+        if isinstance(raw_method_snapshot, dict)
+        else {}
+    )
+    status = str(raw_record.get("status") or "COMPLETE").strip().upper() or "COMPLETE"
+    return TestSampleRecord(
+        index=parse_positive_int(
+            raw_record.get("index", fallback_index), "Sample index"),
+        run_id=parse_nonnegative_int(
+            raw_record.get("run_id", 0), "Sample run ID"),
+        sample_id=sample_id,
+        notes=parse_sample_notes(raw_record.get("notes")),
+        status=status,
+        included=parse_boolean(
+            raw_record.get("included", status == "COMPLETE"),
+            "Sample included",
+        ),
+        started_at=parse_finite_float(
+            raw_record.get("started_at", 0.0), "Sample started time"),
+        finished_at=parse_finite_float(
+            raw_record.get("finished_at", 0.0), "Sample finished time"),
+        point_count=parse_nonnegative_int(
+            raw_record.get("point_count", len(samples)), "Sample point count"),
+        peak_force_n=parse_finite_float(
+            raw_record.get("peak_force_n", 0.0), "Sample peak force"),
+        peak_force_position_mm=parse_finite_float(
+            raw_record.get("peak_force_position_mm", 0.0),
+            "Sample peak force position",
+        ),
+        final_force_n=parse_finite_float(
+            raw_record.get("final_force_n", 0.0), "Sample final force"),
+        final_position_mm=parse_finite_float(
+            raw_record.get("final_position_mm", 0.0), "Sample final position"),
+        method_id=str(raw_record.get("method_id") or "").strip(),
+        method_name=str(raw_record.get("method_name") or "").strip(),
+        method_hash=str(raw_record.get("method_hash") or "").strip(),
+        method_snapshot=method_snapshot,
+        samples=samples,
+    )
+
+
 def parse_return_zero_request(body: dict[str, object]) -> ReturnZeroRequest:
     mode = str(body.get("mode") or "DISPLACEMENT").strip().upper()
     if mode not in RETURN_ZERO_MODES:
@@ -2548,6 +2876,23 @@ def parse_optional_calibration_int(
         raise ValueError(f"{key} must be an integer.") from exc
     if parsed < 0:
         raise ValueError(f"{key} cannot be negative.")
+    return parsed
+
+
+def parse_nonnegative_int(value: object, label: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer.") from exc
+    if parsed < 0:
+        raise ValueError(f"{label} cannot be negative.")
+    return parsed
+
+
+def parse_positive_int(value: object, label: str) -> int:
+    parsed = parse_nonnegative_int(value, label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than zero.")
     return parsed
 
 

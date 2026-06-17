@@ -21,6 +21,7 @@ from app.main import (
     TEST_SPEED_DEFAULT,
     TestCommandError,
     TestMethodStore,
+    TestSampleSetStore,
     TestRunState,
     TestSampleMetadata,
     TestSampleRecord,
@@ -276,6 +277,74 @@ class MultiSampleTests(unittest.TestCase):
             self.assertEqual(len(store.list_methods()), 1)
             self.assertEqual(updated["steps"][0]["target_value"], 75.0)
             self.assertNotEqual(updated["hash"], saved["hash"])
+
+    def test_sample_set_store_saves_lists_loads_and_reopens_sets(self):
+        samples = [telemetry(1.0, 0.1), telemetry(2.0, 0.2)]
+        record = TestSampleRecord(
+            index=1,
+            run_id=7,
+            sample_id="Sample 1",
+            notes="first coupon",
+            status="COMPLETE",
+            included=True,
+            started_at=10.0,
+            finished_at=12.0,
+            point_count=len(samples),
+            peak_force_n=2.0,
+            peak_force_position_mm=0.2,
+            final_force_n=2.0,
+            final_position_mm=0.2,
+            method_id="tpu-pull-v1",
+            method_name="TPU Pull v1",
+            method_hash="abc123",
+            method_snapshot={"name": "TPU Pull v1"},
+            samples=samples,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = TestSampleSetStore(Path(directory))
+            saved = store.save_sample_set(
+                " TPU Set 1 ",
+                [record],
+                {
+                    "id": "tpu-pull-v1",
+                    "name": "TPU Pull v1",
+                    "steps": [step_payload(75.0)],
+                    "motion": {
+                        "jog_speed_steps_s": 500.0,
+                        "test_max_step_rate_steps_s": 1200.0,
+                        "acceleration_steps_s2": 5000.0,
+                    },
+                    "initialization": {},
+                },
+            )
+
+            self.assertEqual(saved.id, "tpu-set-1")
+            self.assertEqual(saved.name, "TPU Set 1")
+            self.assertEqual(saved.samples[0].notes, "first coupon")
+            self.assertEqual(saved.samples[0].samples[1]["force_n"], "2.0000")
+            self.assertEqual(saved.method_snapshot["name"], "TPU Pull v1")
+            self.assertEqual(saved.method_snapshot["steps"][0]["target_value"], 75.0)
+
+            listed = store.list_sample_sets()
+            self.assertEqual([sample_set["id"] for sample_set in listed], ["tpu-set-1"])
+            self.assertEqual(listed[0]["sample_count"], 1)
+
+            loaded = store.get_sample_set("tpu-set-1")
+            self.assertEqual(loaded.name, "TPU Set 1")
+            self.assertEqual(loaded.samples[0].sample_id, "Sample 1")
+            self.assertEqual(loaded.method_snapshot["steps"][0]["target_value"], 75.0)
+
+            monitor = SerialMonitor(AppConfig())
+            monitor.replace_sample_set(loaded)
+            public_set = monitor.public_sample_set()
+            self.assertEqual(public_set["next_sample_id"], "Sample 2")
+            self.assertEqual(public_set["samples"][0]["notes"], "first coupon")
+            overlay = monitor.sample_overlay()
+            self.assertEqual(len(overlay["series"][0]["points"]), 2)
+
+            with self.assertRaises(ValueError):
+                store.save_sample_set("Empty", [])
 
     def test_method_payload_validation(self):
         parsed = parse_test_method({

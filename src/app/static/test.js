@@ -7,6 +7,9 @@ let currentMethod = null;
 let methodDirty = false;
 let methodList = [];
 let selectedMethodId = "";
+let currentSampleSet = null;
+let sampleSetList = [];
+let selectedSampleSetId = "";
 let serialAutoScroll = true;
 let commandInFlight = false;
 let startInFlight = false;
@@ -372,6 +375,8 @@ function updateButtons(status) {
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
   $("add-step-button").disabled = setupBusy;
   $("clear-samples-button").disabled = setupBusy || blocked || samples.length === 0;
+  $("save-sample-set-button").disabled = setupBusy || blocked || samples.length === 0;
+  $("open-sample-set-button").disabled = setupBusy || blocked;
   $("sample-notes").disabled = sampleNotesDisabled;
   for (const input of document.querySelectorAll(".sample-notes-input")) {
     input.disabled = sampleNotesDisabled;
@@ -561,6 +566,9 @@ function updatePage(data) {
 function updateSampleSet(sampleSet) {
   updateSampleDefaults(sampleSet);
   const samples = sampleSet.samples || [];
+  if (samples.length === 0) {
+    currentSampleSet = null;
+  }
   const tableSignature = buildSampleTableSignature(samples);
   if (tableSignature !== sampleTableSignature && !isEditingSampleNotes()) {
     sampleTableSignature = tableSignature;
@@ -1294,6 +1302,80 @@ async function saveMethodFromDialog() {
   }
 }
 
+async function refreshSampleSetList() {
+  const { response, data } = await requestJson("/api/test/sample-sets", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(data.detail || `HTTP ${response.status}`);
+  }
+  sampleSetList = Array.isArray(data.sample_sets) ? data.sample_sets : [];
+  return sampleSetList;
+}
+
+function defaultSampleSetName() {
+  if (currentSampleSet?.name) {
+    return currentSampleSet.name;
+  }
+  return `Test Set ${new Date().toLocaleString()}`;
+}
+
+function updateSaveSampleSetMessage() {
+  const name = $("save-sample-set-name").value.trim();
+  const message = $("save-sample-set-message");
+  if (!name) {
+    message.textContent = "";
+    return;
+  }
+  const nextId = methodIdFromName(name);
+  const existing = sampleSetList.find(
+    (sampleSet) => sampleSet.id === nextId,
+  );
+  if (existing && existing.id !== currentSampleSet?.id) {
+    message.textContent = `Saving will overwrite "${existing.name}".`;
+  } else {
+    message.textContent = "";
+  }
+}
+
+async function openSaveSampleSetDialog() {
+  try {
+    await refreshSampleSetList();
+  } catch (_) {
+    sampleSetList = [];
+  }
+  $("save-sample-set-name").value = defaultSampleSetName();
+  updateSaveSampleSetMessage();
+  $("save-sample-set-dialog").showModal();
+  $("save-sample-set-name").focus();
+}
+
+async function saveSampleSetFromDialog() {
+  const name = $("save-sample-set-name").value.trim();
+  if (!name) {
+    $("save-sample-set-message").textContent = "Enter a test set name.";
+    return;
+  }
+  try {
+    const { response, data } = await requestJson("/api/test/sample-sets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        method_snapshot: currentMethodSnapshot(),
+      }),
+    });
+    if (!response.ok) {
+      $("save-sample-set-message").textContent = data.detail || `HTTP ${response.status}`;
+      return;
+    }
+    currentSampleSet = { id: data.id || "", name: data.name || name };
+    await refreshSampleSetList();
+    $("save-sample-set-dialog").close();
+    setMessage(`Saved test set "${currentSampleSet.name}".`);
+  } catch (error) {
+    $("save-sample-set-message").textContent = `Save failed: ${error}`;
+  }
+}
+
 async function saveSampleNotes(input) {
   const sampleIndex = Number(input.dataset.sampleIndex);
   if (!Number.isFinite(sampleIndex)) {
@@ -1338,6 +1420,22 @@ function renderMethodList() {
   $("confirm-load-method-button").disabled = !selectedMethodId;
 }
 
+function renderSampleSetList() {
+  const list = $("sample-set-list");
+  if (sampleSetList.length === 0) {
+    list.innerHTML = `<div class="method-list-empty">No saved test sets</div>`;
+    $("confirm-open-sample-set-button").disabled = true;
+    return;
+  }
+  list.innerHTML = sampleSetList.map((sampleSet) => `
+    <button class="method-list-item ${sampleSet.id === selectedSampleSetId ? "selected" : ""}" data-sample-set-id="${escapeHtml(sampleSet.id)}" type="button" role="option" aria-selected="${sampleSet.id === selectedSampleSetId ? "true" : "false"}">
+      <strong>${escapeHtml(sampleSet.name)}</strong>
+      <span class="method-list-meta">${sampleSet.sample_count || 0} samples, updated ${escapeHtml(methodUpdatedLabel(sampleSet))}</span>
+    </button>
+  `).join("");
+  $("confirm-open-sample-set-button").disabled = !selectedSampleSetId;
+}
+
 async function openLoadMethodDialog() {
   selectedMethodId = "";
   const warning = $("load-method-warning");
@@ -1353,6 +1451,55 @@ async function openLoadMethodDialog() {
     renderMethodList();
   } catch (error) {
     $("method-list").innerHTML = `<div class="method-list-empty">Could not load methods: ${escapeHtml(error)}</div>`;
+  }
+}
+
+async function openSampleSetDialog() {
+  selectedSampleSetId = "";
+  const warning = $("open-sample-set-warning");
+  const hasSamples = getCurrentSamples().length > 0;
+  warning.hidden = !hasSamples;
+  warning.textContent = hasSamples
+    ? "Opening a saved test set will replace the current in-memory sample set."
+    : "";
+  $("sample-set-list").innerHTML = `<div class="method-list-empty">Loading test sets...</div>`;
+  $("confirm-open-sample-set-button").disabled = true;
+  $("open-sample-set-dialog").showModal();
+  try {
+    await refreshSampleSetList();
+    renderSampleSetList();
+  } catch (error) {
+    $("sample-set-list").innerHTML = `<div class="method-list-empty">Could not load test sets: ${escapeHtml(error)}</div>`;
+  }
+}
+
+async function openSelectedSampleSet() {
+  if (!selectedSampleSetId) {
+    return;
+  }
+  try {
+    const { response, data } = await requestJson(
+      `/api/test/sample-sets/${encodeURIComponent(selectedSampleSetId)}/open`,
+      { method: "POST" },
+    );
+    if (!response.ok) {
+      $("open-sample-set-warning").hidden = false;
+      $("open-sample-set-warning").textContent = data.detail || `HTTP ${response.status}`;
+      return;
+    }
+    currentSampleSet = data.opened_sample_set || sampleSetList.find(
+      (sampleSet) => sampleSet.id === selectedSampleSetId,
+    ) || null;
+    sampleTableSignature = "";
+    updatePage(data);
+    if (data.method_snapshot?.steps) {
+      applyMethod(data.method_snapshot);
+    }
+    $("open-sample-set-dialog").close();
+    setMessage(`Opened test set "${currentSampleSet?.name || selectedSampleSetId}".`);
+  } catch (error) {
+    $("open-sample-set-warning").hidden = false;
+    $("open-sample-set-warning").textContent = `Open failed: ${error}`;
   }
 }
 
@@ -1585,6 +1732,13 @@ $("cancel-save-method-button").addEventListener("click", () => $("save-method-di
 $("confirm-save-method-button").addEventListener("click", saveMethodFromDialog);
 $("cancel-load-method-button").addEventListener("click", () => $("load-method-dialog").close());
 $("confirm-load-method-button").addEventListener("click", loadSelectedMethod);
+$("save-sample-set-button").addEventListener("click", openSaveSampleSetDialog);
+$("open-sample-set-button").addEventListener("click", openSampleSetDialog);
+$("save-sample-set-name").addEventListener("input", updateSaveSampleSetMessage);
+$("cancel-save-sample-set-button").addEventListener("click", () => $("save-sample-set-dialog").close());
+$("confirm-save-sample-set-button").addEventListener("click", saveSampleSetFromDialog);
+$("cancel-open-sample-set-button").addEventListener("click", () => $("open-sample-set-dialog").close());
+$("confirm-open-sample-set-button").addEventListener("click", openSelectedSampleSet);
 $("method-list").addEventListener("click", (event) => {
   const item = event.target.closest(".method-list-item");
   if (!item) {
@@ -1592,6 +1746,14 @@ $("method-list").addEventListener("click", (event) => {
   }
   selectedMethodId = item.dataset.methodId || "";
   renderMethodList();
+});
+$("sample-set-list").addEventListener("click", (event) => {
+  const item = event.target.closest(".method-list-item");
+  if (!item) {
+    return;
+  }
+  selectedSampleSetId = item.dataset.sampleSetId || "";
+  renderSampleSetList();
 });
 $("add-step-button").addEventListener("click", addStep);
 $("start-button").addEventListener("click", startTest);
