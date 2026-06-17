@@ -97,6 +97,28 @@ SAMPLE_WORKBOOK_NUMERIC_FIELDS = {
     "position_mm",
     "step_rate_steps_s",
 }
+SUMMARY_WORKBOOK_FIELDNAMES = [
+    "sample_index",
+    "sample_id",
+    "notes",
+    "included",
+    "status",
+    "method_name",
+    "point_count",
+    "peak_force_n",
+    "peak_force_position_mm",
+    "final_force_n",
+    "final_position_mm",
+]
+SUMMARY_WORKBOOK_NUMERIC_FIELDS = {
+    "sample_index",
+    "point_count",
+    "peak_force_n",
+    "peak_force_position_mm",
+    "final_force_n",
+    "final_position_mm",
+}
+WORKBOOK_FORCE_DISPLACEMENT_MAX_POINTS = 2000
 METHOD_NAME_MAX_LENGTH = 80
 RETURN_ZERO_MODES = {"LOAD", "DISPLACEMENT"}
 RETURN_ZERO_LOAD_DEFAULT_RATE_N_S = 10.0
@@ -572,6 +594,7 @@ class SerialMonitor:
         self._sample_records: list[TestSampleRecord] = []
         self._active_sample: TestSampleMetadata | None = None
         self._active_method_snapshot: dict[str, object] = {}
+        self._sample_set_method_snapshot: dict[str, object] = {}
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
 
@@ -609,34 +632,39 @@ class SerialMonitor:
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {"in_memory": True})
         workbook.set_properties({"title": "Tensile sample set"})
-        used_names: set[str] = set()
+        formats = workbook_formats(workbook)
+        write_summary_worksheet(workbook, self._sample_records, formats)
+        write_method_worksheet(
+            workbook,
+            self._workbook_method_snapshot(),
+            formats,
+        )
+
+        used_names: set[str] = {"summary", "method", "plots"}
+        plot_records: list[TestSampleRecord] = []
         for record in self._sample_records:
             sheet_name = safe_excel_sheet_name(record.sample_id, used_names)
             worksheet = workbook.add_worksheet(sheet_name)
-            rows = [
-                ["sample_index", record.index],
-                ["sample_id", record.sample_id],
-                ["sample_notes", record.notes],
-                ["sample_status", record.status],
-                ["sample_included", 1 if record.included else 0],
-                ["method_id", record.method_id],
-                ["method_name", record.method_name],
-                ["method_hash", record.method_hash],
-                ["method_snapshot_json", json.dumps(record.method_snapshot, sort_keys=True)],
-                [],
-                SAMPLE_WORKBOOK_FIELDNAMES,
-            ]
-            for sample in record.samples:
-                rows.append([
-                    sample_workbook_value(field, sample.get(field, ""))
-                    for field in SAMPLE_WORKBOOK_FIELDNAMES
-                ])
-            write_worksheet_rows(worksheet, rows)
+            write_sample_worksheet(worksheet, record, formats)
+            plot_records.append(record)
         if not self._sample_records:
             worksheet = workbook.add_worksheet("Samples")
-            worksheet.write(0, 0, "No samples recorded")
+            worksheet.write(0, 0, "No samples recorded", formats["title"])
+            worksheet.set_column(0, 0, 24)
+
+        write_plots_worksheet(workbook, plot_records, formats)
         workbook.close()
         return output.getvalue()
+
+    def _workbook_method_snapshot(self) -> dict[str, object]:
+        if self._active_method_snapshot:
+            return dict(self._active_method_snapshot)
+        if self._sample_set_method_snapshot:
+            return dict(self._sample_set_method_snapshot)
+        for record in reversed(self._sample_records):
+            if record.method_snapshot:
+                return dict(record.method_snapshot)
+        return {}
 
     def public_sample_set(self) -> dict[str, object]:
         return {
@@ -697,6 +725,7 @@ class SerialMonitor:
         self._sample_records = []
         self._active_sample = None
         self._active_method_snapshot = {}
+        self._sample_set_method_snapshot = {}
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
         self._test_steps = []
@@ -719,6 +748,7 @@ class SerialMonitor:
         ]
         self._active_sample = None
         self._active_method_snapshot = {}
+        self._sample_set_method_snapshot = dict(sample_set.method_snapshot)
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
         self._test_steps = []
@@ -937,6 +967,7 @@ class SerialMonitor:
             self._test_samples = []
             self._active_sample = sample
             self._active_method_snapshot = dict(method_snapshot)
+            self._sample_set_method_snapshot = dict(method_snapshot)
             self._test_run_kind = RUN_KIND_SPECIMEN
             self._current_run_finalized = False
             self._test_state = TestRunState(
@@ -1935,6 +1966,8 @@ class SerialMonitor:
             final_position = parse_optional_float(final_sample.get("position_mm")) or 0.0
 
         method_snapshot = dict(self._active_method_snapshot)
+        if method_snapshot:
+            self._sample_set_method_snapshot = dict(method_snapshot)
         self._sample_records.append(TestSampleRecord(
             index=len(self._sample_records) + 1,
             run_id=self._test_state.run_id,
@@ -2931,12 +2964,588 @@ def safe_excel_sheet_name(sample_id: str, used_names: set[str]) -> str:
     return candidate
 
 
-def write_worksheet_rows(worksheet: xlsxwriter.worksheet.Worksheet, rows: list[list[object]]) -> None:
-    for row_index, row in enumerate(rows):
-        for column_index, value in enumerate(row):
-            if value is None:
-                continue
-            worksheet.write(row_index, column_index, value)
+def workbook_formats(workbook: xlsxwriter.Workbook) -> dict[str, object]:
+    return {
+        "title": workbook.add_format({
+            "bold": True,
+            "font_size": 14,
+        }),
+        "section": workbook.add_format({
+            "bold": True,
+            "font_size": 11,
+            "top": 1,
+        }),
+        "header": workbook.add_format({
+            "bold": True,
+            "bg_color": "#D9EAF7",
+            "border": 1,
+        }),
+        "label": workbook.add_format({
+            "bold": True,
+            "bg_color": "#F3F6F8",
+        }),
+        "text": workbook.add_format({}),
+        "text_wrap": workbook.add_format({
+            "text_wrap": True,
+            "valign": "top",
+        }),
+        "integer": workbook.add_format({
+            "num_format": "0",
+        }),
+        "number_2": workbook.add_format({
+            "num_format": "0.00",
+        }),
+        "number_3": workbook.add_format({
+            "num_format": "0.000",
+        }),
+        "number_4": workbook.add_format({
+            "num_format": "0.0000",
+        }),
+        "number_5": workbook.add_format({
+            "num_format": "0.00000",
+        }),
+        "boolean": workbook.add_format({}),
+    }
+
+
+def write_summary_worksheet(
+    workbook: xlsxwriter.Workbook,
+    records: list[TestSampleRecord],
+    formats: dict[str, object],
+) -> None:
+    worksheet = workbook.add_worksheet("Summary")
+    worksheet.write(0, 0, "Tensile Sample Set Summary", formats["title"])
+    worksheet.write(1, 0, "Generated At", formats["label"])
+    worksheet.write(
+        1,
+        1,
+        datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        formats["text"],
+    )
+
+    worksheet.write(3, 0, "Statistics (included complete samples)", formats["section"])
+    stats_header = ["Metric", "Count", "Average", "Min", "Max", "Std Dev"]
+    for column_index, heading in enumerate(stats_header):
+        worksheet.write(4, column_index, heading, formats["header"])
+
+    write_stat_row(
+        worksheet,
+        5,
+        "Peak Force (N)",
+        workbook_stat_values(records, "peak_force_n"),
+        formats,
+    )
+    write_stat_row(
+        worksheet,
+        6,
+        "Final Displacement (mm)",
+        workbook_stat_values(records, "final_position_mm"),
+        formats,
+    )
+
+    table_title_row = 8
+    table_header_row = 9
+    data_start_row = table_header_row + 1
+    worksheet.write(table_title_row, 0, "Samples", formats["section"])
+    for column_index, field in enumerate(SUMMARY_WORKBOOK_FIELDNAMES):
+        worksheet.write(table_header_row, column_index, field, formats["header"])
+
+    for row_offset, record in enumerate(records):
+        values = summary_workbook_row(record)
+        row_index = data_start_row + row_offset
+        for column_index, field in enumerate(SUMMARY_WORKBOOK_FIELDNAMES):
+            write_workbook_value(
+                worksheet,
+                row_index,
+                column_index,
+                values[field],
+                summary_workbook_cell_format(field, formats),
+            )
+
+    if records:
+        worksheet.autofilter(
+            table_header_row,
+            0,
+            data_start_row + len(records) - 1,
+            len(SUMMARY_WORKBOOK_FIELDNAMES) - 1,
+        )
+    else:
+        worksheet.write(data_start_row, 0, "No samples recorded", formats["text"])
+        worksheet.autofilter(
+            table_header_row,
+            0,
+            table_header_row,
+            len(SUMMARY_WORKBOOK_FIELDNAMES) - 1,
+        )
+
+    chart_records = included_complete_records(records)
+    chart_header_row = table_header_row
+    chart_data_row = data_start_row
+    chart_columns = (24, 25, 26)
+    for column_index, heading in zip(
+        chart_columns,
+        ["chart_sample", "chart_peak_force_n", "chart_final_displacement_mm"],
+    ):
+        worksheet.write(chart_header_row, column_index, heading, formats["header"])
+    for row_offset, record in enumerate(chart_records):
+        row_index = chart_data_row + row_offset
+        worksheet.write(row_index, chart_columns[0], record.sample_id, formats["text"])
+        write_workbook_value(
+            worksheet,
+            row_index,
+            chart_columns[1],
+            record.peak_force_n,
+            formats["number_4"],
+        )
+        write_workbook_value(
+            worksheet,
+            row_index,
+            chart_columns[2],
+            record.final_position_mm,
+            formats["number_5"],
+        )
+    worksheet.set_column(chart_columns[0], chart_columns[-1], None, None, {"hidden": True})
+
+    if chart_records:
+        last_chart_row = chart_data_row + len(chart_records) - 1
+        peak_chart = workbook.add_chart({"type": "column"})
+        peak_chart.add_series({
+            "name": "Peak Force (N)",
+            "categories": ["Summary", chart_data_row, chart_columns[0], last_chart_row, chart_columns[0]],
+            "values": ["Summary", chart_data_row, chart_columns[1], last_chart_row, chart_columns[1]],
+            "fill": {"color": "#4472C4"},
+        })
+        peak_chart.set_title({"name": "Peak Force by Sample"})
+        peak_chart.set_x_axis({"name": "Sample"})
+        peak_chart.set_y_axis({"name": "Force (N)"})
+        peak_chart.set_legend({"none": True})
+        worksheet.insert_chart(1, 12, peak_chart, {"x_scale": 1.15, "y_scale": 1.0})
+
+        displacement_chart = workbook.add_chart({"type": "line"})
+        displacement_chart.add_series({
+            "name": "Final Displacement (mm)",
+            "categories": ["Summary", chart_data_row, chart_columns[0], last_chart_row, chart_columns[0]],
+            "values": ["Summary", chart_data_row, chart_columns[2], last_chart_row, chart_columns[2]],
+            "line": {"color": "#70AD47", "width": 2.25},
+            "marker": {"type": "circle", "size": 5},
+        })
+        displacement_chart.set_title({"name": "Final Displacement by Sample"})
+        displacement_chart.set_x_axis({"name": "Sample"})
+        displacement_chart.set_y_axis({"name": "Displacement (mm)"})
+        displacement_chart.set_legend({"none": True})
+        worksheet.insert_chart(17, 12, displacement_chart, {"x_scale": 1.15, "y_scale": 1.0})
+    else:
+        worksheet.write(1, 12, "No included complete samples to chart.", formats["text"])
+
+    worksheet.freeze_panes(data_start_row, 0)
+    worksheet.set_column(0, 0, 12)
+    worksheet.set_column(1, 1, 16)
+    worksheet.set_column(2, 2, 28)
+    worksheet.set_column(3, 6, 14)
+    worksheet.set_column(7, 10, 18)
+
+
+def write_method_worksheet(
+    workbook: xlsxwriter.Workbook,
+    method_snapshot: dict[str, object],
+    formats: dict[str, object],
+) -> None:
+    worksheet = workbook.add_worksheet("Method")
+    worksheet.write(0, 0, "Test Method", formats["title"])
+    worksheet.set_column(0, 0, 28)
+    worksheet.set_column(1, 1, 24)
+    worksheet.set_column(2, 5, 18)
+
+    if not method_snapshot:
+        worksheet.write(2, 0, "No method saved with this sample set", formats["text"])
+        return
+
+    method_hash_value = str(method_snapshot.get("hash") or method_hash(method_snapshot))
+    metadata = [
+        ("Method ID", method_snapshot.get("id") or ""),
+        ("Method Name", method_snapshot.get("name") or ""),
+        ("Method Hash", method_hash_value),
+        ("Schema Version", method_snapshot.get("schema_version") or ""),
+    ]
+    for row_offset, (label, value) in enumerate(metadata, start=2):
+        worksheet.write(row_offset, 0, label, formats["label"])
+        write_workbook_value(worksheet, row_offset, 1, value, formats["text"])
+
+    row_index = 8
+    row_index = write_method_mapping_section(
+        worksheet,
+        row_index,
+        "Motion Settings",
+        method_snapshot.get("motion"),
+        [
+            "jog_speed_steps_s",
+            "test_max_step_rate_steps_s",
+            "acceleration_steps_s2",
+        ],
+        formats,
+    )
+    row_index = write_method_mapping_section(
+        worksheet,
+        row_index + 1,
+        "Initialization",
+        method_snapshot.get("initialization"),
+        [
+            "mode",
+            "preload_force_n",
+            "unload_force_n",
+            "rate_mm_s",
+            "max_travel_mm",
+        ],
+        formats,
+    )
+
+    steps = method_snapshot.get("steps")
+    step_rows = steps if isinstance(steps, list) else []
+    row_index += 2
+    worksheet.write(row_index, 0, "Steps", formats["section"])
+    row_index += 1
+    step_fields = [
+        "step",
+        "target_type",
+        "target_value",
+        "rate_type",
+        "rate_value_per_s",
+        "hold_duration_s",
+    ]
+    for column_index, field in enumerate(step_fields):
+        worksheet.write(row_index, column_index, field, formats["header"])
+
+    for step_offset, raw_step in enumerate(step_rows, start=1):
+        raw = raw_step if isinstance(raw_step, dict) else {}
+        values = {
+            "step": step_offset,
+            "target_type": raw.get("target_type") or "",
+            "target_value": raw.get("target_value") or "",
+            "rate_type": raw.get("rate_type") or "",
+            "rate_value_per_s": raw.get("rate_value_per_s") or "",
+            "hold_duration_s": raw.get("hold_duration_s") or "",
+        }
+        for column_index, field in enumerate(step_fields):
+            cell_format = formats["integer"] if field == "step" else workbook_value_format(
+                values[field], formats)
+            write_workbook_value(
+                worksheet,
+                row_index + step_offset,
+                column_index,
+                values[field],
+                cell_format,
+            )
+    if step_rows:
+        worksheet.autofilter(row_index, 0, row_index + len(step_rows), len(step_fields) - 1)
+    else:
+        worksheet.write(row_index + 1, 0, "No steps saved with this method", formats["text"])
+
+
+def write_method_mapping_section(
+    worksheet: xlsxwriter.worksheet.Worksheet,
+    row_index: int,
+    title: str,
+    raw_mapping: object,
+    keys: list[str],
+    formats: dict[str, object],
+) -> int:
+    mapping = raw_mapping if isinstance(raw_mapping, dict) else {}
+    worksheet.write(row_index, 0, title, formats["section"])
+    row_index += 1
+    worksheet.write(row_index, 0, "Setting", formats["header"])
+    worksheet.write(row_index, 1, "Value", formats["header"])
+    for key in keys:
+        row_index += 1
+        worksheet.write(row_index, 0, key, formats["label"])
+        value = mapping.get(key, "")
+        write_workbook_value(
+            worksheet,
+            row_index,
+            1,
+            value,
+            workbook_value_format(value, formats),
+        )
+    return row_index
+
+
+def write_sample_worksheet(
+    worksheet: xlsxwriter.worksheet.Worksheet,
+    record: TestSampleRecord,
+    formats: dict[str, object],
+) -> None:
+    metadata_rows = [
+        ("sample_index", record.index),
+        ("sample_id", record.sample_id),
+        ("sample_notes", record.notes),
+        ("sample_status", record.status),
+        ("sample_included", 1 if record.included else 0),
+        ("method_id", record.method_id),
+        ("method_name", record.method_name),
+        ("method_hash", record.method_hash),
+        ("method_snapshot_json", json.dumps(record.method_snapshot, sort_keys=True)),
+    ]
+    for row_index, (label, value) in enumerate(metadata_rows):
+        worksheet.write(row_index, 0, label, formats["label"])
+        value_format = formats["text_wrap"] if label == "method_snapshot_json" else workbook_value_format(
+            value, formats)
+        write_workbook_value(worksheet, row_index, 1, value, value_format)
+
+    header_row = 10
+    for column_index, field in enumerate(SAMPLE_WORKBOOK_FIELDNAMES):
+        worksheet.write(header_row, column_index, field, formats["header"])
+        worksheet.set_column(
+            column_index,
+            column_index,
+            sample_workbook_column_width(field),
+        )
+    worksheet.set_column(1, 1, 22)
+
+    for row_offset, sample in enumerate(record.samples, start=1):
+        for column_index, field in enumerate(SAMPLE_WORKBOOK_FIELDNAMES):
+            value = sample_workbook_value(field, sample.get(field, ""))
+            write_workbook_value(
+                worksheet,
+                header_row + row_offset,
+                column_index,
+                value,
+                sample_workbook_cell_format(field, formats),
+            )
+
+    last_row = header_row + max(1, len(record.samples))
+    worksheet.autofilter(header_row, 0, last_row, len(SAMPLE_WORKBOOK_FIELDNAMES) - 1)
+    worksheet.freeze_panes(header_row + 1, 0)
+
+
+def write_plots_worksheet(
+    workbook: xlsxwriter.Workbook,
+    records: list[TestSampleRecord],
+    formats: dict[str, object],
+) -> None:
+    worksheet = workbook.add_worksheet("Plots")
+    worksheet.write(0, 0, "Force-Displacement Overlay", formats["title"])
+    worksheet.write(
+        1,
+        0,
+        f"Charts use up to {WORKBOOK_FORCE_DISPLACEMENT_MAX_POINTS:,} points per included complete sample.",
+        formats["text"],
+    )
+
+    chart = workbook.add_chart({"type": "scatter", "subtype": "straight"})
+    series_count = 0
+    column_index = 0
+    for record in records:
+        if not record.included or record.status != "COMPLETE":
+            continue
+        points = workbook_force_displacement_points(record.samples)
+        sampled_points = sampled_workbook_points(
+            points,
+            WORKBOOK_FORCE_DISPLACEMENT_MAX_POINTS,
+        )
+        if not sampled_points:
+            continue
+
+        worksheet.write(3, column_index, f"{record.sample_id} position_mm", formats["header"])
+        worksheet.write(3, column_index + 1, f"{record.sample_id} force_n", formats["header"])
+        for row_offset, point in enumerate(sampled_points, start=4):
+            worksheet.write_number(row_offset, column_index, point[0], formats["number_5"])
+            worksheet.write_number(row_offset, column_index + 1, point[1], formats["number_4"])
+
+        last_row = 3 + len(sampled_points)
+        chart.add_series({
+            "name": record.sample_id,
+            "categories": ["Plots", 4, column_index, last_row, column_index],
+            "values": ["Plots", 4, column_index + 1, last_row, column_index + 1],
+            "marker": {"type": "none"},
+        })
+        worksheet.set_column(column_index, column_index + 1, 18)
+        column_index += 2
+        series_count += 1
+
+    if series_count:
+        chart.set_title({"name": "Force vs Displacement"})
+        chart.set_x_axis({"name": "Displacement (mm)"})
+        chart.set_y_axis({"name": "Force (N)"})
+        worksheet.insert_chart(3, max(4, column_index + 1), chart, {
+            "x_scale": 1.45,
+            "y_scale": 1.3,
+        })
+        worksheet.freeze_panes(4, 0)
+    else:
+        worksheet.write(3, 0, "No included complete samples to plot.", formats["text"])
+        worksheet.set_column(0, 0, 34)
+
+
+def write_stat_row(
+    worksheet: xlsxwriter.worksheet.Worksheet,
+    row_index: int,
+    label: str,
+    stats: dict[str, float | int],
+    formats: dict[str, object],
+) -> None:
+    worksheet.write(row_index, 0, label, formats["label"])
+    write_workbook_value(worksheet, row_index, 1, stats["count"], formats["integer"])
+    for column_index, key in enumerate(["average", "min", "max", "std_dev"], start=2):
+        write_workbook_value(worksheet, row_index, column_index, stats[key], formats["number_4"])
+
+
+def summary_workbook_row(record: TestSampleRecord) -> dict[str, object]:
+    return {
+        "sample_index": record.index,
+        "sample_id": record.sample_id,
+        "notes": record.notes,
+        "included": record.included,
+        "status": record.status,
+        "method_name": record.method_name,
+        "point_count": record.point_count,
+        "peak_force_n": record.peak_force_n,
+        "peak_force_position_mm": record.peak_force_position_mm,
+        "final_force_n": record.final_force_n,
+        "final_position_mm": record.final_position_mm,
+    }
+
+
+def included_complete_records(records: list[TestSampleRecord]) -> list[TestSampleRecord]:
+    return [
+        record
+        for record in records
+        if record.included and record.status == "COMPLETE"
+    ]
+
+
+def workbook_stat_values(
+    records: list[TestSampleRecord],
+    field: str,
+) -> dict[str, float | int]:
+    values = [
+        value
+        for record in included_complete_records(records)
+        if isinstance((value := getattr(record, field)), (int, float))
+        and math.isfinite(float(value))
+    ]
+    if not values:
+        return {
+            "count": 0,
+            "average": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "std_dev": 0.0,
+        }
+    average = sum(values) / len(values)
+    return {
+        "count": len(values),
+        "average": average,
+        "min": min(values),
+        "max": max(values),
+        "std_dev": sample_standard_deviation(values, average),
+    }
+
+
+def sample_standard_deviation(values: list[float], average: float) -> float:
+    if len(values) < 2:
+        return 0.0
+    variance = sum((value - average) ** 2 for value in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def workbook_force_displacement_points(
+    samples: list[dict[str, object]],
+) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for sample in samples:
+        position = parse_optional_float(sample.get("position_mm"))
+        force = parse_optional_float(sample.get("force_n"))
+        if position is None or force is None:
+            continue
+        points.append((position, force))
+    return points
+
+
+def sampled_workbook_points(
+    points: list[tuple[float, float]],
+    max_points: int,
+) -> list[tuple[float, float]]:
+    if len(points) <= max_points:
+        return points
+    if max_points <= 1:
+        return points[:1]
+    last_index = len(points) - 1
+    return [
+        points[round(index * last_index / (max_points - 1))]
+        for index in range(max_points)
+    ]
+
+
+def write_workbook_value(
+    worksheet: xlsxwriter.worksheet.Worksheet,
+    row_index: int,
+    column_index: int,
+    value: object,
+    cell_format: object = None,
+) -> None:
+    if value is None or value == "":
+        worksheet.write_blank(row_index, column_index, None, cell_format)
+    elif isinstance(value, bool):
+        worksheet.write_boolean(row_index, column_index, value, cell_format)
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            worksheet.write_blank(row_index, column_index, None, cell_format)
+        else:
+            worksheet.write_number(row_index, column_index, value, cell_format)
+    else:
+        worksheet.write(row_index, column_index, str(value), cell_format)
+
+
+def workbook_value_format(value: object, formats: dict[str, object]) -> object:
+    if isinstance(value, bool):
+        return formats["boolean"]
+    if isinstance(value, int):
+        return formats["integer"]
+    if isinstance(value, float):
+        return formats["number_4"]
+    return formats["text"]
+
+
+def summary_workbook_cell_format(field: str, formats: dict[str, object]) -> object:
+    if field not in SUMMARY_WORKBOOK_NUMERIC_FIELDS:
+        return formats["boolean"] if field == "included" else formats["text"]
+    if field in {"sample_index", "point_count"}:
+        return formats["integer"]
+    if field in {"peak_force_position_mm", "final_position_mm"}:
+        return formats["number_5"]
+    return formats["number_4"]
+
+
+def sample_workbook_cell_format(field: str, formats: dict[str, object]) -> object:
+    if field not in SAMPLE_WORKBOOK_NUMERIC_FIELDS:
+        return formats["text"]
+    if field in {"controller_time_ms", "run_id", "step_index"}:
+        return formats["integer"]
+    if field == "wall_time_s":
+        return formats["number_3"]
+    if field == "step_rate_steps_s":
+        return formats["number_2"]
+    if field in {"position_mm", "setpoint_displacement_mm"}:
+        return formats["number_5"]
+    return formats["number_4"]
+
+
+def sample_workbook_column_width(field: str) -> int:
+    widths = {
+        "wall_time_s": 12,
+        "controller_time_ms": 18,
+        "run_id": 10,
+        "frame_mode": 14,
+        "step_index": 12,
+        "phase": 16,
+        "fault_reason": 16,
+        "control_mode": 14,
+        "setpoint_force_n": 18,
+        "setpoint_displacement_mm": 24,
+        "force_n": 14,
+        "position_mm": 14,
+        "step_rate_steps_s": 18,
+    }
+    return widths.get(field, 14)
 
 
 def sample_workbook_value(field: str, value: object) -> object:

@@ -112,6 +112,53 @@ def telemetry_line(
     return ",".join(str(field) for field in fields)
 
 
+WORKBOOK_NAMESPACE = {
+    "sheet": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+}
+
+
+def workbook_sheet_names(archive):
+    workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+    return [
+        sheet.attrib["name"]
+        for sheet in workbook.findall(".//sheet:sheet", WORKBOOK_NAMESPACE)
+    ]
+
+
+def workbook_sheet_xml(archive, sheet_name):
+    workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+    rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    rel_targets = {
+        rel.attrib["Id"]: rel.attrib["Target"]
+        for rel in rels.findall(".//rel:Relationship", WORKBOOK_NAMESPACE)
+    }
+    for sheet in workbook.findall(".//sheet:sheet", WORKBOOK_NAMESPACE):
+        if sheet.attrib["name"] == sheet_name:
+            rel_id = sheet.attrib[
+                "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+            ]
+            target = rel_targets[rel_id].lstrip("/")
+            path = target if target.startswith("xl/") else f"xl/{target}"
+            return archive.read(path)
+    raise AssertionError(f"Workbook sheet {sheet_name!r} was not found.")
+
+
+def worksheet_cells(worksheet_xml):
+    worksheet = ET.fromstring(worksheet_xml)
+    return {
+        cell.attrib["r"]: cell
+        for cell in worksheet.findall(".//sheet:c", WORKBOOK_NAMESPACE)
+    }
+
+
+def worksheet_number(cells, cell_ref):
+    value = cells[cell_ref].find("sheet:v", WORKBOOK_NAMESPACE)
+    if value is None:
+        raise AssertionError(f"Cell {cell_ref} does not contain a value.")
+    return float(value.text)
+
+
 class MultiSampleTests(unittest.TestCase):
     def test_machine_payload_accepts_old_and_new_motion_fields(self):
         old_payload = [
@@ -168,6 +215,13 @@ class MultiSampleTests(unittest.TestCase):
                     "id": "tpu-pull-v1",
                     "name": "TPU Pull v1",
                     "motion": {},
+                    "initialization": {
+                        "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
+                        "preload_force_n": -10.0,
+                        "unload_force_n": -0.5,
+                        "rate_mm_s": 0.02,
+                        "max_travel_mm": 2.0,
+                    },
                 },
             },
             [step(50.0)],
@@ -186,26 +240,102 @@ class MultiSampleTests(unittest.TestCase):
         self.assertEqual(record.method_id, "tpu-pull-v1")
         self.assertEqual(record.method_name, "TPU Pull v1")
         self.assertEqual(record.method_hash, method_hash(record.method_snapshot))
+        monitor._sample_records.extend([
+            TestSampleRecord(
+                index=2,
+                run_id=8,
+                sample_id="A-2",
+                notes="excluded coupon",
+                status="COMPLETE",
+                included=False,
+                started_at=20.0,
+                finished_at=21.0,
+                point_count=1,
+                peak_force_n=99.0,
+                peak_force_position_mm=9.9,
+                final_force_n=90.0,
+                final_position_mm=9.0,
+                samples=[telemetry(99.0, 9.9)],
+            ),
+            TestSampleRecord(
+                index=3,
+                run_id=9,
+                sample_id="A-3",
+                notes="stopped coupon",
+                status="STOPPED",
+                included=True,
+                started_at=30.0,
+                finished_at=31.0,
+                point_count=1,
+                peak_force_n=75.0,
+                peak_force_position_mm=7.5,
+                final_force_n=70.0,
+                final_position_mm=7.0,
+                samples=[telemetry(75.0, 7.5)],
+            ),
+            TestSampleRecord(
+                index=4,
+                run_id=10,
+                sample_id="A-4",
+                notes="faulted coupon",
+                status="FAULTED",
+                included=False,
+                started_at=40.0,
+                finished_at=41.0,
+                point_count=1,
+                peak_force_n=55.0,
+                peak_force_position_mm=5.5,
+                final_force_n=50.0,
+                final_position_mm=5.0,
+                samples=[telemetry(55.0, 5.5)],
+            ),
+        ])
         workbook = monitor.sample_set_workbook()
         with zipfile.ZipFile(BytesIO(workbook)) as archive:
-            workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
+            sheet_names = workbook_sheet_names(archive)
             shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
-            worksheet_xml = archive.read("xl/worksheets/sheet1.xml")
-        self.assertIn('name="A-1"', workbook_xml)
+            summary_xml = workbook_sheet_xml(archive, "Summary")
+            method_xml = workbook_sheet_xml(archive, "Method")
+            worksheet_xml = workbook_sheet_xml(archive, "A-1")
+            chart_files = [
+                name
+                for name in archive.namelist()
+                if name.startswith("xl/charts/chart")
+            ]
+        self.assertEqual(
+            sheet_names,
+            ["Summary", "Method", "A-1", "A-2", "A-3", "A-4", "Plots"],
+        )
         self.assertIn("sample_id", shared_strings)
         self.assertIn("A-1", shared_strings)
+        self.assertIn("A-2", shared_strings)
+        self.assertIn("A-3", shared_strings)
+        self.assertIn("A-4", shared_strings)
+        self.assertIn("STOPPED", shared_strings)
+        self.assertIn("FAULTED", shared_strings)
         self.assertIn("method_name", shared_strings)
         self.assertIn("TPU Pull v1", shared_strings)
-        worksheet = ET.fromstring(worksheet_xml)
-        namespace = {"sheet": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-        cells = {
-            cell.attrib["r"]: cell
-            for cell in worksheet.findall(".//sheet:c", namespace)
-        }
+        self.assertIn("unload_force_n", shared_strings)
+        self.assertIn("-0.5", method_xml.decode("utf-8"))
+        self.assertGreaterEqual(len(chart_files), 3)
+
+        summary_cells = worksheet_cells(summary_xml)
+        self.assertEqual(worksheet_number(summary_cells, "B6"), 1.0)
+        self.assertEqual(worksheet_number(summary_cells, "C6"), -5.0)
+        self.assertEqual(worksheet_number(summary_cells, "B7"), 1.0)
+        self.assertEqual(worksheet_number(summary_cells, "C7"), 0.6)
+        for cell_ref in ["A11", "G11", "H11", "I11", "J11", "K11"]:
+            with self.subTest(cell_ref=cell_ref):
+                self.assertNotEqual(summary_cells[cell_ref].attrib.get("t"), "s")
+                self.assertIsNotNone(
+                    summary_cells[cell_ref].find("sheet:v", WORKBOOK_NAMESPACE))
+
+        cells = worksheet_cells(worksheet_xml)
         for cell_ref in ["A12", "B12", "C12", "E12", "I12", "J12", "K12", "L12", "M12"]:
             with self.subTest(cell_ref=cell_ref):
                 self.assertNotEqual(cells[cell_ref].attrib.get("t"), "s")
-                self.assertIsNotNone(cells[cell_ref].find("sheet:v", namespace))
+                self.assertIsNotNone(
+                    cells[cell_ref].find("sheet:v", WORKBOOK_NAMESPACE))
         for cell_ref in ["D12", "F12", "G12", "H12"]:
             with self.subTest(cell_ref=cell_ref):
                 self.assertEqual(cells[cell_ref].attrib.get("t"), "s")
@@ -221,7 +351,29 @@ class MultiSampleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             monitor.set_sample_notes(1, "x" * 201)
         with self.assertRaises(TestCommandError):
-            monitor.set_sample_notes(2, "missing")
+            monitor.set_sample_notes(99, "missing")
+
+    def test_empty_sample_set_workbook_has_summary(self):
+        monitor = SerialMonitor(AppConfig())
+
+        workbook = monitor.sample_set_workbook()
+
+        with zipfile.ZipFile(BytesIO(workbook)) as archive:
+            sheet_names = workbook_sheet_names(archive)
+            shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
+            summary_xml = workbook_sheet_xml(archive, "Summary")
+            method_xml = workbook_sheet_xml(archive, "Method")
+
+        self.assertEqual(sheet_names, ["Summary", "Method", "Samples", "Plots"])
+        self.assertIn("No samples recorded", shared_strings)
+        self.assertIn("No method saved with this sample set", shared_strings)
+        summary_cells = worksheet_cells(summary_xml)
+        self.assertEqual(worksheet_number(summary_cells, "B6"), 0.0)
+        self.assertEqual(worksheet_number(summary_cells, "B7"), 0.0)
+        self.assertIn(
+            "No method saved with this sample set",
+            method_xml.decode("utf-8") + shared_strings,
+        )
 
     def test_method_store_saves_lists_loads_and_overwrites_methods(self):
         with TemporaryDirectory() as directory:
