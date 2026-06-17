@@ -15,6 +15,7 @@ class LiveForceCharts {
     this.incrementalUpdateInFlight = false;
     this.visible = !document.hidden;
     this.hasCommandedForce = false;
+    this.showCommandedForce = true;
     this.config = {
       responsive: true,
       displaylogo: false,
@@ -80,6 +81,16 @@ class LiveForceCharts {
       this.fullRenderNeeded = true;
       this.draw();
     }
+  }
+
+  setCommandedForceVisible(visible) {
+    const nextVisible = Boolean(visible);
+    if (this.showCommandedForce === nextVisible) {
+      return;
+    }
+    this.showCommandedForce = nextVisible;
+    this.fullRenderNeeded = true;
+    this.scheduleUpdate();
   }
 
   draw() {
@@ -202,7 +213,7 @@ class LiveForceCharts {
         customdata: [customData],
       };
       const timeTraceIndexes = [0];
-      if (this.hasCommandedForce) {
+      if (this.hasCommandedForce && this.showCommandedForce) {
         timeTraceUpdate.x.push(times);
         timeTraceUpdate.y.push(points.map((point) => point.commandedForceN));
         timeTraceUpdate.customdata.push(points.map(() => null));
@@ -258,7 +269,7 @@ class LiveForceCharts {
         "Time %{x:.3f} s<br>Force %{y:.4f} N<br>Phase %{customdata[0]}<br>Step %{customdata[1]}<br>Rate %{customdata[3]:.2f} steps/s<extra></extra>",
     };
 
-    if (!this.hasCommandedForce) {
+    if (!this.hasCommandedForce || !this.showCommandedForce) {
       return [measured];
     }
 

@@ -628,6 +628,16 @@ input[type="range"] {
   accent-color: #176a8f;
 }
 
+.toggle-control.compact {
+  min-height: 0;
+  font-size: 12px;
+}
+
+.toggle-control.compact input {
+  width: 16px;
+  height: 16px;
+}
+
 .action-button,
 .icon-button,
 .mini-button {

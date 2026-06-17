@@ -1499,6 +1499,10 @@ $("overlay-toggle").addEventListener("change", () => {
   }
 });
 
+$("commanded-force-toggle").addEventListener("change", () => {
+  liveCharts.setCommandedForceVisible($("commanded-force-toggle").checked);
+});
+
 $("return-zero-mode").addEventListener("change", updateReturnZeroRateControl);
 $("initialization-mode").addEventListener("change", () => {
   updateInitializationVisibility();
