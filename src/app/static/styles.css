@@ -240,7 +240,7 @@ h2 {
 
 .initialization-fields {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
 }
 
@@ -728,7 +728,7 @@ input[type="range"] {
 }
 
 .sample-table {
-  min-width: 980px;
+  min-width: 1120px;
 }
 
 .calibration-table {
@@ -763,6 +763,14 @@ input[type="range"] {
 .empty-table-cell {
   color: #65717a;
   text-align: center;
+}
+
+.sample-notes-cell {
+  min-width: 240px;
+}
+
+.sample-notes-input {
+  min-width: 220px;
 }
 
 .table-input {

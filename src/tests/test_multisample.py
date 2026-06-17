@@ -2,6 +2,7 @@ import asyncio
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import xml.etree.ElementTree as ET
 import zipfile
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -188,11 +189,38 @@ class MultiSampleTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(workbook)) as archive:
             workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
             shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
+            worksheet_xml = archive.read("xl/worksheets/sheet1.xml")
         self.assertIn('name="A-1"', workbook_xml)
         self.assertIn("sample_id", shared_strings)
         self.assertIn("A-1", shared_strings)
         self.assertIn("method_name", shared_strings)
         self.assertIn("TPU Pull v1", shared_strings)
+        worksheet = ET.fromstring(worksheet_xml)
+        namespace = {"sheet": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        cells = {
+            cell.attrib["r"]: cell
+            for cell in worksheet.findall(".//sheet:c", namespace)
+        }
+        for cell_ref in ["A12", "B12", "C12", "E12", "I12", "J12", "K12", "L12", "M12"]:
+            with self.subTest(cell_ref=cell_ref):
+                self.assertNotEqual(cells[cell_ref].attrib.get("t"), "s")
+                self.assertIsNotNone(cells[cell_ref].find("sheet:v", namespace))
+        for cell_ref in ["D12", "F12", "G12", "H12"]:
+            with self.subTest(cell_ref=cell_ref):
+                self.assertEqual(cells[cell_ref].attrib.get("t"), "s")
+
+        monitor.set_sample_notes(1, " revised coupon ")
+        self.assertEqual(record.notes, "revised coupon")
+        workbook = monitor.sample_set_workbook()
+        with zipfile.ZipFile(BytesIO(workbook)) as archive:
+            shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
+        self.assertIn("revised coupon", shared_strings)
+        self.assertNotIn(">valid<", shared_strings)
+
+        with self.assertRaises(ValueError):
+            monitor.set_sample_notes(1, "x" * 201)
+        with self.assertRaises(TestCommandError):
+            monitor.set_sample_notes(2, "missing")
 
     def test_method_store_saves_lists_loads_and_overwrites_methods(self):
         with TemporaryDirectory() as directory:
@@ -208,6 +236,7 @@ class MultiSampleTests(unittest.TestCase):
                 "initialization": {
                     "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
                     "preload_force_n": -10.0,
+                    "unload_force_n": -0.5,
                     "rate_mm_s": 0.02,
                     "max_travel_mm": 2.0,
                 },
@@ -222,6 +251,7 @@ class MultiSampleTests(unittest.TestCase):
                 INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
             )
             self.assertEqual(saved["initialization"]["preload_force_n"], -10.0)
+            self.assertEqual(saved["initialization"]["unload_force_n"], -0.5)
 
             listed = store.list_methods()
             self.assertEqual([method["id"] for method in listed], ["tpu-pull-v1"])
@@ -231,6 +261,7 @@ class MultiSampleTests(unittest.TestCase):
             self.assertEqual(loaded["name"], "TPU Pull v1")
             self.assertEqual(loaded["hash"], saved["hash"])
             self.assertEqual(loaded["initialization"]["rate_mm_s"], 0.02)
+            self.assertEqual(loaded["initialization"]["unload_force_n"], -0.5)
 
             updated = store.save_method({
                 "name": "TPU Pull v1",
@@ -263,6 +294,7 @@ class MultiSampleTests(unittest.TestCase):
             "initialization": {
                 "mode": INITIALIZATION_MODE_NONE,
                 "preload_force_n": 0,
+                "unload_force_n": 99,
                 "rate_mm_s": 0,
                 "max_travel_mm": 0,
             },
@@ -270,6 +302,10 @@ class MultiSampleTests(unittest.TestCase):
         self.assertEqual(
             parsed_disabled_initialization.initialization.preload_force_n,
             10.0,
+        )
+        self.assertEqual(
+            parsed_disabled_initialization.initialization.unload_force_n,
+            0.0,
         )
 
         with self.assertRaises(ValueError):
@@ -289,6 +325,7 @@ class MultiSampleTests(unittest.TestCase):
         invalid_initializations = [
             {"mode": "BAD_MODE"},
             {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "preload_force_n": 0},
+            {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "unload_force_n": "bad"},
             {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "rate_mm_s": 0},
             {"mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO, "max_travel_mm": 0},
         ]
@@ -473,6 +510,7 @@ class MultiSampleTests(unittest.TestCase):
                     "initialization": {
                         "mode": INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
                         "preload_force_n": 10.0,
+                        "unload_force_n": 0.5,
                         "rate_mm_s": 0.02,
                         "max_travel_mm": 2.0,
                     },
@@ -484,7 +522,7 @@ class MultiSampleTests(unittest.TestCase):
             self.assertEqual(len(monitor._test_steps), 2)
             self.assertEqual(monitor._test_steps[0].target_value, 10.0)
             self.assertEqual(monitor._test_steps[0].rate_type, "DISPLACEMENT")
-            self.assertEqual(monitor._test_steps[1].target_value, 0.0)
+            self.assertEqual(monitor._test_steps[1].target_value, 0.5)
             initialization_run_id = monitor._test_state.run_id
 
             monitor._apply_event(["EVT", "STEP_COMPLETE", str(initialization_run_id), "1"])

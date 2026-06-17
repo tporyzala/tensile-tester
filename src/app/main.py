@@ -69,6 +69,32 @@ TEST_RATE_TYPES = {"FORCE", "DISPLACEMENT"}
 SERIAL_LOG_DEFAULT_MAX_LINES = 500
 SAMPLE_ID_MAX_LENGTH = 64
 SAMPLE_NOTES_MAX_LENGTH = 200
+SAMPLE_WORKBOOK_FIELDNAMES = [
+    "wall_time_s",
+    "controller_time_ms",
+    "run_id",
+    "frame_mode",
+    "step_index",
+    "phase",
+    "fault_reason",
+    "control_mode",
+    "setpoint_force_n",
+    "setpoint_displacement_mm",
+    "force_n",
+    "position_mm",
+    "step_rate_steps_s",
+]
+SAMPLE_WORKBOOK_NUMERIC_FIELDS = {
+    "wall_time_s",
+    "controller_time_ms",
+    "run_id",
+    "step_index",
+    "setpoint_force_n",
+    "setpoint_displacement_mm",
+    "force_n",
+    "position_mm",
+    "step_rate_steps_s",
+}
 METHOD_NAME_MAX_LENGTH = 80
 RETURN_ZERO_MODES = {"LOAD", "DISPLACEMENT"}
 RETURN_ZERO_LOAD_DEFAULT_RATE_N_S = 10.0
@@ -94,6 +120,7 @@ INITIALIZATION_MODES = {
     INITIALIZATION_MODE_PRELOAD_UNLOAD_ZERO,
 }
 INITIALIZATION_PRELOAD_FORCE_DEFAULT_N = 10.0
+INITIALIZATION_UNLOAD_FORCE_DEFAULT_N = 0.0
 INITIALIZATION_RATE_DEFAULT_MM_S = 0.02
 INITIALIZATION_MAX_TRAVEL_DEFAULT_MM = 2.0
 INITIALIZATION_HOLD_DURATION_S = 1.0
@@ -182,6 +209,7 @@ class TestStep:
 class TestInitialization:
     mode: str = INITIALIZATION_MODE_NONE
     preload_force_n: float = INITIALIZATION_PRELOAD_FORCE_DEFAULT_N
+    unload_force_n: float = INITIALIZATION_UNLOAD_FORCE_DEFAULT_N
     rate_mm_s: float = INITIALIZATION_RATE_DEFAULT_MM_S
     max_travel_mm: float = INITIALIZATION_MAX_TRAVEL_DEFAULT_MM
 
@@ -467,21 +495,6 @@ class SerialMonitor:
         return self._default_sample_id()
 
     def sample_set_workbook(self) -> bytes:
-        fieldnames = [
-            "wall_time_s",
-            "controller_time_ms",
-            "run_id",
-            "frame_mode",
-            "step_index",
-            "phase",
-            "fault_reason",
-            "control_mode",
-            "setpoint_force_n",
-            "setpoint_displacement_mm",
-            "force_n",
-            "position_mm",
-            "step_rate_steps_s",
-        ]
         output = BytesIO()
         workbook = xlsxwriter.Workbook(output, {"in_memory": True})
         workbook.set_properties({"title": "Tensile sample set"})
@@ -494,16 +507,19 @@ class SerialMonitor:
                 ["sample_id", record.sample_id],
                 ["sample_notes", record.notes],
                 ["sample_status", record.status],
-                ["sample_included", "1" if record.included else "0"],
+                ["sample_included", 1 if record.included else 0],
                 ["method_id", record.method_id],
                 ["method_name", record.method_name],
                 ["method_hash", record.method_hash],
                 ["method_snapshot_json", json.dumps(record.method_snapshot, sort_keys=True)],
                 [],
-                fieldnames,
+                SAMPLE_WORKBOOK_FIELDNAMES,
             ]
             for sample in record.samples:
-                rows.append([sample.get(field, "") for field in fieldnames])
+                rows.append([
+                    sample_workbook_value(field, sample.get(field, ""))
+                    for field in SAMPLE_WORKBOOK_FIELDNAMES
+                ])
             write_worksheet_rows(worksheet, rows)
         if not self._sample_records:
             worksheet = workbook.add_worksheet("Samples")
@@ -580,6 +596,13 @@ class SerialMonitor:
         for record in self._sample_records:
             if record.index == sample_index:
                 record.included = included
+                return
+        raise TestCommandError(f"Sample {sample_index} was not found.")
+
+    def set_sample_notes(self, sample_index: int, notes: str) -> None:
+        for record in self._sample_records:
+            if record.index == sample_index:
+                record.notes = parse_sample_notes(notes)
                 return
         raise TestCommandError(f"Sample {sample_index} was not found.")
 
@@ -903,7 +926,7 @@ class SerialMonitor:
             ),
             TestStep(
                 target_type="FORCE",
-                target_value=0.0,
+                target_value=initialization.unload_force_n,
                 rate_type="DISPLACEMENT",
                 rate_value_per_s=initialization.rate_mm_s,
                 hold_duration_s=INITIALIZATION_HOLD_DURATION_S,
@@ -2159,6 +2182,18 @@ async def set_test_sample_included(request: Request) -> JSONResponse:
     return JSONResponse(request.app.state.monitor.public_test_state())
 
 
+@app.post("/api/test/samples/notes")
+async def set_test_sample_notes(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        sample_index = int(body.get("index"))
+        notes = parse_sample_notes(body.get("notes"))
+        request.app.state.monitor.set_sample_notes(sample_index, notes)
+    except (TypeError, ValueError, TestCommandError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(request.app.state.monitor.public_test_state())
+
+
 @app.get("/api/test/samples/overlay")
 async def test_sample_overlay(request: Request) -> JSONResponse:
     return JSONResponse(request.app.state.monitor.sample_overlay())
@@ -2270,6 +2305,10 @@ def parse_method_initialization(raw_initialization: object) -> TestInitializatio
         raw.get("preload_force_n", INITIALIZATION_PRELOAD_FORCE_DEFAULT_N),
         "Initialization preload force",
     )
+    unload_force_n = parse_finite_float(
+        raw.get("unload_force_n", INITIALIZATION_UNLOAD_FORCE_DEFAULT_N),
+        "Initialization unload force",
+    )
     rate_mm_s = parse_finite_float(
         raw.get("rate_mm_s", INITIALIZATION_RATE_DEFAULT_MM_S),
         "Initialization rate",
@@ -2288,6 +2327,7 @@ def parse_method_initialization(raw_initialization: object) -> TestInitializatio
     return TestInitialization(
         mode=mode,
         preload_force_n=preload_force_n,
+        unload_force_n=unload_force_n,
         rate_mm_s=rate_mm_s,
         max_travel_mm=max_travel_mm,
     )
@@ -2407,14 +2447,19 @@ def parse_sample_metadata(body: dict[str, object], default_sample_id: str) -> Te
         raise ValueError("Sample metadata is not valid.")
 
     sample_id = str(raw_sample.get("id") or "").strip() or default_sample_id
-    notes = str(raw_sample.get("notes") or "").strip()
+    notes = parse_sample_notes(raw_sample.get("notes"))
     if len(sample_id) > SAMPLE_ID_MAX_LENGTH:
         raise ValueError(
             f"Sample ID cannot exceed {SAMPLE_ID_MAX_LENGTH} characters.")
+    return TestSampleMetadata(sample_id=sample_id, notes=notes)
+
+
+def parse_sample_notes(value: object) -> str:
+    notes = str(value or "").strip()
     if len(notes) > SAMPLE_NOTES_MAX_LENGTH:
         raise ValueError(
             f"Sample notes cannot exceed {SAMPLE_NOTES_MAX_LENGTH} characters.")
-    return TestSampleMetadata(sample_id=sample_id, notes=notes)
+    return notes
 
 
 def parse_return_zero_request(body: dict[str, object]) -> ReturnZeroRequest:
@@ -2547,6 +2592,19 @@ def write_worksheet_rows(worksheet: xlsxwriter.worksheet.Worksheet, rows: list[l
             if value is None:
                 continue
             worksheet.write(row_index, column_index, value)
+
+
+def sample_workbook_value(field: str, value: object) -> object:
+    if field not in SAMPLE_WORKBOOK_NUMERIC_FIELDS:
+        return value
+    if value is None or value == "":
+        return ""
+    parsed = parse_optional_float(value)
+    if parsed is None:
+        return value
+    if field in {"controller_time_ms", "run_id", "step_index"} and parsed.is_integer():
+        return int(parsed)
+    return parsed
 
 
 def parse_finite_float(value: object, label: str) -> float:

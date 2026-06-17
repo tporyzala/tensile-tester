@@ -19,6 +19,7 @@ let lastMotionSent = "";
 let lastConnected = false;
 let lastStatus = "IDLE";
 let sampleSetSignature = "";
+let sampleTableSignature = "";
 let overlayEnabled = false;
 let overlayRefreshInFlight = false;
 let plotCursor = 0;
@@ -53,6 +54,7 @@ const INITIALIZATION_MODE_PRELOAD = "PRELOAD_UNLOAD_ZERO_DISPLACEMENT";
 const DEFAULT_INITIALIZATION = {
   mode: INITIALIZATION_MODE_NONE,
   preload_force_n: 10,
+  unload_force_n: 0,
   rate_mm_s: 0.02,
   max_travel_mm: 2,
 };
@@ -168,6 +170,9 @@ function normalizedInitialization(initialization = {}) {
     preload_force_n: Number.isFinite(Number(initialization.preload_force_n))
       ? Number(initialization.preload_force_n)
       : DEFAULT_INITIALIZATION.preload_force_n,
+    unload_force_n: Number.isFinite(Number(initialization.unload_force_n))
+      ? Number(initialization.unload_force_n)
+      : DEFAULT_INITIALIZATION.unload_force_n,
     rate_mm_s: Number.isFinite(Number(initialization.rate_mm_s))
       ? Number(initialization.rate_mm_s)
       : DEFAULT_INITIALIZATION.rate_mm_s,
@@ -183,6 +188,7 @@ function currentInitializationSnapshot() {
       ? INITIALIZATION_MODE_PRELOAD
       : INITIALIZATION_MODE_NONE,
     preload_force_n: Number($("initialization-preload-force").value),
+    unload_force_n: Number($("initialization-unload-force").value),
     rate_mm_s: Number($("initialization-rate").value),
     max_travel_mm: Number($("initialization-max-travel").value),
   };
@@ -196,6 +202,7 @@ function applyInitialization(initialization = {}) {
   const parsed = normalizedInitialization(initialization);
   $("initialization-mode").value = parsed.mode;
   $("initialization-preload-force").value = String(parsed.preload_force_n);
+  $("initialization-unload-force").value = String(parsed.unload_force_n);
   $("initialization-rate").value = String(parsed.rate_mm_s);
   $("initialization-max-travel").value = String(parsed.max_travel_mm);
   updateInitializationVisibility();
@@ -342,6 +349,9 @@ function updateButtons(status) {
     setupBusy || zeroingInFlight || motionInFlight || calibrationBusy ||
     !readyForSetupActions || !lastConnected;
   const samples = getCurrentSamples();
+  const sampleNotesDisabled =
+    setupBusy || motionInFlight || zeroingInFlight ||
+    calibrationBusy || !readyForSetupActions;
   $("start-button").disabled =
     setupBusy || motionInFlight || zeroingInFlight ||
     calibrationBusy || !readyForSetupActions;
@@ -362,7 +372,10 @@ function updateButtons(status) {
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
   $("add-step-button").disabled = setupBusy;
   $("clear-samples-button").disabled = setupBusy || blocked || samples.length === 0;
-  $("sample-notes").disabled = setupBusy || motionInFlight || zeroingInFlight || calibrationBusy || !readyForSetupActions;
+  $("sample-notes").disabled = sampleNotesDisabled;
+  for (const input of document.querySelectorAll(".sample-notes-input")) {
+    input.disabled = sampleNotesDisabled;
+  }
   for (const slider of motionSliders()) {
     slider.disabled = setupControlsDisabled;
   }
@@ -547,8 +560,13 @@ function updatePage(data) {
 
 function updateSampleSet(sampleSet) {
   updateSampleDefaults(sampleSet);
-  renderSampleTable(sampleSet.samples || []);
-  const signature = buildSampleSetSignature(sampleSet.samples || []);
+  const samples = sampleSet.samples || [];
+  const tableSignature = buildSampleTableSignature(samples);
+  if (tableSignature !== sampleTableSignature && !isEditingSampleNotes()) {
+    sampleTableSignature = tableSignature;
+    renderSampleTable(samples);
+  }
+  const signature = buildSampleSetSignature(samples);
   if (signature !== sampleSetSignature) {
     sampleSetSignature = signature;
     if (overlayEnabled) {
@@ -593,15 +611,36 @@ function renderSampleTable(samples) {
       <td>
         <input class="include-checkbox" data-sample-index="${sample.index}" type="checkbox" ${sample.included ? "checked" : ""}>
       </td>
-      <td>${escapeHtml(sample.notes)}</td>
+      <td class="sample-notes-cell">
+        <input class="table-input sample-notes-input" data-sample-index="${sample.index}" data-sample-id="${escapeHtml(sample.sample_id)}" type="text" maxlength="200" value="${escapeHtml(sample.notes)}" aria-label="Notes for ${escapeHtml(sample.sample_id)}">
+      </td>
     </tr>
   `).join("");
+  updateButtons(lastStatus);
+}
+
+function isEditingSampleNotes() {
+  return document.activeElement?.classList.contains("sample-notes-input") || false;
 }
 
 function buildSampleSetSignature(samples) {
   return samples
     .map((sample) => `${sample.index}:${sample.included}:${sample.status}:${sample.point_count}:${sample.method_hash || ""}`)
     .join("|");
+}
+
+function buildSampleTableSignature(samples) {
+  return JSON.stringify(samples.map((sample) => [
+    sample.index,
+    sample.sample_id,
+    sample.status,
+    sample.method_name || "",
+    sample.point_count || 0,
+    sample.peak_force_n ?? null,
+    sample.final_position_mm ?? null,
+    Boolean(sample.included),
+    sample.notes || "",
+  ]));
 }
 
 function setCalibrationMessage(text) {
@@ -1255,6 +1294,34 @@ async function saveMethodFromDialog() {
   }
 }
 
+async function saveSampleNotes(input) {
+  const sampleIndex = Number(input.dataset.sampleIndex);
+  if (!Number.isFinite(sampleIndex)) {
+    return;
+  }
+  commandInFlight = true;
+  updateButtons(lastStatus);
+  try {
+    const notes = input.value.trim();
+    const { response, data } = await requestJson("/api/test/samples/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: sampleIndex, notes }),
+    });
+    if (!response.ok) {
+      setMessage(data.detail || `HTTP ${response.status}`);
+      return;
+    }
+    updatePage(data);
+    setMessage(`Updated notes for ${input.dataset.sampleId || `Sample ${sampleIndex}`}.`);
+  } catch (error) {
+    setMessage(`Sample notes error: ${error}`);
+  } finally {
+    commandInFlight = false;
+    updateButtons(lastStatus);
+  }
+}
+
 function renderMethodList() {
   const list = $("method-list");
   if (methodList.length === 0) {
@@ -1468,7 +1535,13 @@ $("step-body").addEventListener("click", (event) => {
   }
 });
 
-$("sample-body").addEventListener("change", (event) => {
+$("sample-body").addEventListener("change", async (event) => {
+  const notesInput = event.target.closest(".sample-notes-input");
+  if (notesInput) {
+    await saveSampleNotes(notesInput);
+    return;
+  }
+
   const checkbox = event.target.closest(".include-checkbox");
   if (!checkbox) {
     return;
@@ -1499,6 +1572,7 @@ $("initialization-mode").addEventListener("change", () => {
 });
 for (const input of [
   $("initialization-preload-force"),
+  $("initialization-unload-force"),
   $("initialization-rate"),
   $("initialization-max-travel"),
 ]) {
