@@ -131,7 +131,7 @@ constexpr bool DisableMotorWhenIdle = false;
 constexpr int8_t IncreaseLoadDirection = 1;
 constexpr float MinStepRateStepsS = 50.0f;
 constexpr float MaxStepRateStepsS = 4000.0f;
-constexpr float DefaultMaxStepRateStepsS = 1200.0f;
+constexpr float DefaultMaxStepRateStepsS = 2000.0f;
 constexpr float ForceKpStepsPerSecondPerNewton = 12.0f;
 constexpr float ForceKiStepsPerSecondPerNewtonSecond = 1.0f;
 constexpr float ForceKdStepsPerSecondPerNewtonPerSecond = 0.0f;
@@ -152,9 +152,9 @@ constexpr uint16_t ButtonDebounceMs = 25;
 Setup jog and automated tests intentionally have different speed ceilings:
 
 - Setup jog slider: `50` to `4000 steps/s`, default `4000 steps/s`.
-- Automated test max-speed slider: `50` to `4000 steps/s`, default `1200 steps/s`.
+- Automated test max-speed slider: `50` to `4000 steps/s`, default `2000 steps/s`.
 - Shared acceleration slider: `100` to `10000 steps/s^2`, default `10000 steps/s^2`.
-- With the current mechanics, `1200 steps/s` is about `0.1562 mm/s` because the conversion is `200 * 19.203 * 8 / 4 = 7681.2 steps/mm`.
+- With the current mechanics, `2000 steps/s` is about `0.2604 mm/s`, and `10000 steps/s^2` is about `1.3019 mm/s^2`, because the conversion is `200 * 19.203 * 8 / 4 = 7681.2 steps/mm`.
 
 PlatformIO dependencies:
 

@@ -46,7 +46,7 @@ const tabTitles = {
 };
 const returnZeroRates = {
   LOAD: { value: 10, label: "Rate (N/s)", step: "0.1", max: "" },
-  DISPLACEMENT: { value: 0.1562, label: "Rate (mm/s)", step: "0.0001", max: "0.1562" },
+  DISPLACEMENT: { value: 0.2604, label: "Rate (mm/s)", step: "0.0001", max: "0.2604" },
 };
 let lastDisplacementReturnDefault = returnZeroRates.DISPLACEMENT.value;
 const liveCharts = new LiveForceCharts(
@@ -331,10 +331,30 @@ function motionSliders() {
   ];
 }
 
+function motionPhysicalLabel(stepsValue, stepUnits, physicalUnits) {
+  const steps = Number(stepsValue);
+  if (!Number.isFinite(steps)) {
+    return `-- ${stepUnits} (-- ${physicalUnits})`;
+  }
+  return `${steps.toFixed(0)} ${stepUnits} (${(steps / STEPS_PER_MM).toFixed(4)} ${physicalUnits})`;
+}
+
 function updateMotionLabels() {
-  $("jog-speed-value").textContent = `${Number($("jog-speed-slider").value).toFixed(0)} steps/s`;
-  $("test-speed-value").textContent = `${Number($("test-speed-slider").value).toFixed(0)} steps/s`;
-  $("acceleration-value").textContent = `${Number($("acceleration-slider").value).toFixed(0)} steps/s^2`;
+  $("jog-speed-value").textContent = motionPhysicalLabel(
+    $("jog-speed-slider").value,
+    "steps/s",
+    "mm/s",
+  );
+  $("test-speed-value").textContent = motionPhysicalLabel(
+    $("test-speed-slider").value,
+    "steps/s",
+    "mm/s",
+  );
+  $("acceleration-value").textContent = motionPhysicalLabel(
+    $("acceleration-slider").value,
+    "steps/s^2",
+    "mm/s^2",
+  );
   updateDisplacementReturnLimit(Number($("test-speed-slider").value));
 }
 

@@ -44,7 +44,7 @@ namespace Test {
 constexpr int8_t IncreaseLoadDirection = 1;
 constexpr float MinStepRateStepsS = 50.0f;
 constexpr float MaxStepRateStepsS = 4000.0f;
-constexpr float DefaultMaxStepRateStepsS = 1200.0f;
+constexpr float DefaultMaxStepRateStepsS = 2000.0f;
 constexpr float ForceKpStepsPerSecondPerNewton = 12.0f;
 constexpr float ForceKiStepsPerSecondPerNewtonSecond = 1.0f;
 constexpr float ForceKdStepsPerSecondPerNewtonPerSecond = 0.0f;
