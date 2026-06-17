@@ -1,5 +1,7 @@
 import asyncio
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import zipfile
 import unittest
 from unittest.mock import AsyncMock, Mock
@@ -13,14 +15,18 @@ from app.main import (
     SerialMonitor,
     STEPS_PER_MM,
     TEST_SPEED_DEFAULT,
+    TestMethodStore,
     TestRunState,
     TestSampleMetadata,
     TestSampleRecord,
     TestStep,
+    method_hash,
     parse_machine_payload,
     parse_relative_move_offset,
     parse_return_zero_request,
+    parse_run_method_snapshot,
     parse_sample_metadata,
+    parse_test_method,
 )
 
 
@@ -32,6 +38,16 @@ def step(target=100.0):
         rate_value_per_s=10.0,
         hold_duration_s=5.0,
     )
+
+
+def step_payload(target=100.0):
+    return {
+        "target_type": "FORCE",
+        "target_value": target,
+        "rate_type": "FORCE",
+        "rate_value_per_s": 10.0,
+        "hold_duration_s": 5.0,
+    }
 
 
 def telemetry(force, position):
@@ -124,6 +140,16 @@ class MultiSampleTests(unittest.TestCase):
             telemetry(-5.0, 0.4),
             telemetry(3.0, 0.6),
         ]
+        monitor._active_method_snapshot = parse_run_method_snapshot(
+            {
+                "method_snapshot": {
+                    "id": "tpu-pull-v1",
+                    "name": "TPU Pull v1",
+                    "motion": {},
+                },
+            },
+            [step(50.0)],
+        )
 
         monitor._finalize_active_sample("COMPLETE")
 
@@ -135,6 +161,9 @@ class MultiSampleTests(unittest.TestCase):
         self.assertEqual(record.peak_force_position_mm, 0.4)
         self.assertEqual(record.final_force_n, 3.0)
         self.assertEqual(record.final_position_mm, 0.6)
+        self.assertEqual(record.method_id, "tpu-pull-v1")
+        self.assertEqual(record.method_name, "TPU Pull v1")
+        self.assertEqual(record.method_hash, method_hash(record.method_snapshot))
         workbook = monitor.sample_set_workbook()
         with zipfile.ZipFile(BytesIO(workbook)) as archive:
             workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
@@ -142,6 +171,71 @@ class MultiSampleTests(unittest.TestCase):
         self.assertIn('name="A-1"', workbook_xml)
         self.assertIn("sample_id", shared_strings)
         self.assertIn("A-1", shared_strings)
+        self.assertIn("method_name", shared_strings)
+        self.assertIn("TPU Pull v1", shared_strings)
+
+    def test_method_store_saves_lists_loads_and_overwrites_methods(self):
+        with TemporaryDirectory() as directory:
+            store = TestMethodStore(Path(directory))
+            saved = store.save_method({
+                "name": "TPU Pull v1",
+                "steps": [step_payload(50.0)],
+                "motion": {
+                    "jog_speed_steps_s": 500.0,
+                    "test_max_step_rate_steps_s": 1200.0,
+                    "acceleration_steps_s2": 5000.0,
+                },
+            })
+
+            self.assertEqual(saved["id"], "tpu-pull-v1")
+            self.assertEqual(saved["name"], "TPU Pull v1")
+            self.assertEqual(saved["steps"][0]["target_value"], 50.0)
+            self.assertEqual(saved["motion"]["jog_speed_steps_s"], 500.0)
+
+            listed = store.list_methods()
+            self.assertEqual([method["id"] for method in listed], ["tpu-pull-v1"])
+            self.assertEqual(listed[0]["step_count"], 1)
+
+            loaded = store.get_method("tpu-pull-v1")
+            self.assertEqual(loaded["name"], "TPU Pull v1")
+            self.assertEqual(loaded["hash"], saved["hash"])
+
+            updated = store.save_method({
+                "name": "TPU Pull v1",
+                "steps": [step_payload(75.0)],
+                "motion": {
+                    "jog_speed_steps_s": 500.0,
+                    "test_max_step_rate_steps_s": 1200.0,
+                    "acceleration_steps_s2": 5000.0,
+                },
+            })
+
+            self.assertEqual(len(store.list_methods()), 1)
+            self.assertEqual(updated["steps"][0]["target_value"], 75.0)
+            self.assertNotEqual(updated["hash"], saved["hash"])
+
+    def test_method_payload_validation(self):
+        parsed = parse_test_method({
+            "name": "  Compression  ",
+            "steps": [step_payload(-25.0)],
+            "motion": {},
+        })
+        self.assertEqual(parsed.name, "Compression")
+        self.assertEqual(parsed.steps[0].target_value, -25.0)
+
+        with self.assertRaises(ValueError):
+            parse_test_method({
+                "name": "",
+                "steps": [step_payload()],
+                "motion": {},
+            })
+
+        with self.assertRaises(ValueError):
+            parse_test_method({
+                "name": "Bad Motion",
+                "steps": [step_payload()],
+                "motion": {"jog_speed_steps_s": -1},
+            })
 
     def test_plot_data_retains_all_periodic_telemetry_until_clear(self):
         monitor = SerialMonitor(AppConfig())

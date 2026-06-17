@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import os
 import platform
@@ -10,6 +12,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import TypeVar
@@ -26,7 +29,9 @@ from app.calibration import CalibrationSample, fit_load_cell_calibration
 SetupCommandResult = TypeVar("SetupCommandResult")
 
 
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+DEFAULT_METHOD_DIR = PROJECT_DIR / "data" / "test-methods"
 DEFAULT_SERIAL_PORT = "COM3" if platform.system(
 ).lower().startswith("win") else "/dev/ttyACM0"
 
@@ -64,6 +69,7 @@ TEST_RATE_TYPES = {"FORCE", "DISPLACEMENT"}
 SERIAL_LOG_DEFAULT_MAX_LINES = 500
 SAMPLE_ID_MAX_LENGTH = 64
 SAMPLE_NOTES_MAX_LENGTH = 200
+METHOD_NAME_MAX_LENGTH = 80
 RETURN_ZERO_MODES = {"LOAD", "DISPLACEMENT"}
 RETURN_ZERO_LOAD_DEFAULT_RATE_N_S = 10.0
 STEPS_PER_MM = (
@@ -94,6 +100,7 @@ class AppConfig:
         os.getenv("TENSILE_SERIAL_RECONNECT_S", "2.0"))
     serial_log_max_lines: int = int(
         os.getenv("TENSILE_SERIAL_LOG_MAX_LINES", str(SERIAL_LOG_DEFAULT_MAX_LINES)))
+    method_dir: Path = Path(os.getenv("TENSILE_METHOD_DIR", str(DEFAULT_METHOD_DIR)))
 
 
 @dataclass(slots=True)
@@ -161,6 +168,17 @@ class TestStep:
 
 
 @dataclass(slots=True)
+class TestMethod:
+    id: str
+    name: str
+    steps: list[TestStep]
+    motion: dict[str, float] = field(default_factory=dict)
+    schema_version: int = 1
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
 class TestRunState:
     run_id: int = 0
     status: str = "IDLE"
@@ -196,6 +214,10 @@ class TestSampleRecord:
     peak_force_position_mm: float
     final_force_n: float
     final_position_mm: float
+    method_id: str = ""
+    method_name: str = ""
+    method_hash: str = ""
+    method_snapshot: dict[str, object] = field(default_factory=dict)
     samples: list[dict[str, object]] = field(default_factory=list)
 
 
@@ -227,6 +249,87 @@ class TestCommandError(MachineCommandError):
 
 class CalibrationCommandError(MachineCommandError):
     pass
+
+
+class TestMethodStore:
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def list_methods(self) -> list[dict[str, object]]:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        methods: list[dict[str, object]] = []
+        for path in sorted(self.directory.glob("*.json")):
+            try:
+                method = self._load_path(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            methods.append(self._summary(method))
+        return sorted(
+            methods,
+            key=lambda item: str(item.get("updated_at") or ""),
+            reverse=True,
+        )
+
+    def get_method(self, method_id: str) -> dict[str, object]:
+        return method_to_public(self._load_path(self._path_for_id(method_id)))
+
+    def save_method(self, payload: dict[str, object]) -> dict[str, object]:
+        parsed = parse_test_method(payload)
+        now = utc_timestamp()
+        method_id = method_id_from_name(parsed.name)
+        path = self._path_for_id(method_id)
+        created_at = now
+        if path.exists():
+            try:
+                existing = self._load_path(path)
+                created_at = existing.created_at or now
+            except (OSError, ValueError, json.JSONDecodeError):
+                created_at = now
+
+        method = TestMethod(
+            id=method_id,
+            name=parsed.name,
+            steps=parsed.steps,
+            motion=parsed.motion,
+            schema_version=1,
+            created_at=created_at,
+            updated_at=now,
+        )
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"{json.dumps(method_to_public(method), indent=2)}\n",
+            encoding="utf-8",
+        )
+        return method_to_public(method)
+
+    def _path_for_id(self, method_id: str) -> Path:
+        parsed = parse_method_id(method_id)
+        return self.directory / f"{parsed}.json"
+
+    def _load_path(self, path: Path) -> TestMethod:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Method file must contain an object.")
+        method = parse_test_method(data)
+        return TestMethod(
+            id=parse_method_id(data.get("id") or method_id_from_name(method.name)),
+            name=method.name,
+            steps=method.steps,
+            motion=method.motion,
+            schema_version=1,
+            created_at=str(data.get("created_at") or ""),
+            updated_at=str(data.get("updated_at") or ""),
+        )
+
+    def _summary(self, method: TestMethod) -> dict[str, object]:
+        return {
+            "id": method.id,
+            "name": method.name,
+            "step_count": len(method.steps),
+            "created_at": method.created_at,
+            "updated_at": method.updated_at,
+            "hash": method_hash(method_to_public(method)),
+        }
 
 
 def parse_machine_payload(payload: list[str]) -> MachinePayload:
@@ -302,6 +405,7 @@ class SerialMonitor:
         self._test_heartbeat_task: asyncio.Task[None] | None = None
         self._sample_records: list[TestSampleRecord] = []
         self._active_sample: TestSampleMetadata | None = None
+        self._active_method_snapshot: dict[str, object] = {}
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
 
@@ -364,6 +468,10 @@ class SerialMonitor:
                 ["sample_notes", record.notes],
                 ["sample_status", record.status],
                 ["sample_included", "1" if record.included else "0"],
+                ["method_id", record.method_id],
+                ["method_name", record.method_name],
+                ["method_hash", record.method_hash],
+                ["method_snapshot_json", json.dumps(record.method_snapshot, sort_keys=True)],
                 [],
                 fieldnames,
             ]
@@ -434,6 +542,7 @@ class SerialMonitor:
                 "Stop the active test before clearing the sample set.")
         self._sample_records = []
         self._active_sample = None
+        self._active_method_snapshot = {}
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
         self._test_steps = []
@@ -462,6 +571,9 @@ class SerialMonitor:
             "peak_force_position_mm": record.peak_force_position_mm,
             "final_force_n": record.final_force_n,
             "final_position_mm": record.final_position_mm,
+            "method_id": record.method_id,
+            "method_name": record.method_name,
+            "method_hash": record.method_hash,
         }
 
     async def send(self, line: str, log: bool = True) -> None:
@@ -607,6 +719,7 @@ class SerialMonitor:
         self,
         steps: list[TestStep],
         sample: TestSampleMetadata | None = None,
+        method_snapshot: dict[str, object] | None = None,
     ) -> None:
         async with self._command_lock:
             if self._serial is None:
@@ -625,6 +738,7 @@ class SerialMonitor:
             self._test_steps = list(steps)
             self._test_samples = []
             self._active_sample = sample
+            self._active_method_snapshot = freeze_method_snapshot(method_snapshot, steps)
             self._test_run_kind = RUN_KIND_SPECIMEN
             self._current_run_finalized = False
             self._test_state = TestRunState(
@@ -711,6 +825,7 @@ class SerialMonitor:
 
         self._test_steps = [step]
         self._active_sample = None
+        self._active_method_snapshot = {}
         self._test_run_kind = run_kind
         self._current_run_finalized = False
         self._test_state = TestRunState(
@@ -1472,6 +1587,7 @@ class SerialMonitor:
             final_force = parse_optional_float(final_sample.get("force_n")) or 0.0
             final_position = parse_optional_float(final_sample.get("position_mm")) or 0.0
 
+        method_snapshot = dict(self._active_method_snapshot)
         self._sample_records.append(TestSampleRecord(
             index=len(self._sample_records) + 1,
             run_id=self._test_state.run_id,
@@ -1486,12 +1602,17 @@ class SerialMonitor:
             peak_force_position_mm=peak_position,
             final_force_n=final_force,
             final_position_mm=final_position,
+            method_id=str(method_snapshot.get("id") or ""),
+            method_name=str(method_snapshot.get("name") or ""),
+            method_hash=method_hash(method_snapshot) if method_snapshot else "",
+            method_snapshot=method_snapshot,
             samples=[dict(sample) for sample in self._test_samples],
         ))
         self._current_run_finalized = True
 
     def _clear_active_run_context(self) -> None:
         self._active_sample = None
+        self._active_method_snapshot = {}
         self._test_run_kind = RUN_KIND_NONE
         self._current_run_finalized = False
 
@@ -1593,6 +1714,7 @@ config = AppConfig()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.method_store = TestMethodStore(config.method_dir)
     app.state.monitor = SerialMonitor(config)
     await app.state.monitor.start()
     try:
@@ -1708,6 +1830,30 @@ async def test_state(request: Request) -> JSONResponse:
     return JSONResponse(request.app.state.monitor.public_test_state())
 
 
+@app.get("/api/test/methods")
+async def list_test_methods(request: Request) -> JSONResponse:
+    return JSONResponse({"methods": request.app.state.method_store.list_methods()})
+
+
+@app.get("/api/test/methods/{method_id}")
+async def get_test_method(request: Request, method_id: str) -> JSONResponse:
+    try:
+        method = request.app.state.method_store.get_method(method_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Test method was not found.") from exc
+    return JSONResponse(method)
+
+
+@app.post("/api/test/methods")
+async def save_test_method(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        method = request.app.state.method_store.save_method(body)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(method)
+
+
 @app.post("/api/test/start")
 async def start_test(request: Request) -> JSONResponse:
     body = await request.json()
@@ -1715,7 +1861,8 @@ async def start_test(request: Request) -> JSONResponse:
     try:
         steps = parse_test_steps(body)
         sample = parse_sample_metadata(body, monitor.default_sample_id())
-        await monitor.start_test(steps, sample)
+        method_snapshot = parse_run_method_snapshot(body, steps)
+        await monitor.start_test(steps, sample, method_snapshot)
     except (ValueError, TestCommandError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse(monitor.public_test_state())
@@ -1830,6 +1977,134 @@ async def health(request: Request) -> dict[str, object]:
         "frame_mode": data["frame_mode"],
         "test_phase": data["test_phase"],
     }
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def method_id_from_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    slug = slug[:64].strip("-")
+    return slug or "method"
+
+
+def parse_method_id(value: object) -> str:
+    parsed = str(value or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", parsed):
+        raise ValueError("Method ID is not valid.")
+    return parsed
+
+
+def parse_method_name(value: object) -> str:
+    parsed = str(value or "").strip()
+    if not parsed:
+        raise ValueError("Method name is required.")
+    if len(parsed) > METHOD_NAME_MAX_LENGTH:
+        raise ValueError(
+            f"Method name cannot exceed {METHOD_NAME_MAX_LENGTH} characters.")
+    return parsed
+
+
+def parse_method_motion(raw_motion: object) -> dict[str, float]:
+    raw = raw_motion if isinstance(raw_motion, dict) else {}
+    values = {
+        "jog_speed_steps_s": (
+            raw.get("jog_speed_steps_s", MOTION_SPEED_DEFAULT),
+            MOTION_SPEED_MIN,
+            MOTION_SPEED_MAX,
+            "Method jog speed",
+        ),
+        "test_max_step_rate_steps_s": (
+            raw.get("test_max_step_rate_steps_s", TEST_SPEED_DEFAULT),
+            TEST_SPEED_MIN,
+            TEST_SPEED_MAX,
+            "Method test max speed",
+        ),
+        "acceleration_steps_s2": (
+            raw.get("acceleration_steps_s2", MOTION_ACCELERATION_DEFAULT),
+            MOTION_ACCELERATION_MIN,
+            MOTION_ACCELERATION_MAX,
+            "Method acceleration",
+        ),
+    }
+    parsed: dict[str, float] = {}
+    for key, (value, minimum, maximum, label) in values.items():
+        numeric = parse_finite_float(value, label)
+        if numeric < minimum or numeric > maximum:
+            raise ValueError(f"{label} must be between {minimum:g} and {maximum:g}.")
+        parsed[key] = numeric
+    return parsed
+
+
+def parse_test_method(payload: dict[str, object]) -> TestMethod:
+    if not isinstance(payload, dict):
+        raise ValueError("Method payload is not valid.")
+    name = parse_method_name(payload.get("name"))
+    return TestMethod(
+        id=method_id_from_name(name),
+        name=name,
+        steps=parse_test_steps(payload),
+        motion=parse_method_motion(payload.get("motion")),
+        schema_version=1,
+        created_at=str(payload.get("created_at") or ""),
+        updated_at=str(payload.get("updated_at") or ""),
+    )
+
+
+def method_to_public(method: TestMethod) -> dict[str, object]:
+    stable = {
+        "schema_version": method.schema_version,
+        "id": method.id,
+        "name": method.name,
+        "steps": [asdict(step) for step in method.steps],
+        "motion": dict(method.motion),
+    }
+    return {
+        **stable,
+        "created_at": method.created_at,
+        "updated_at": method.updated_at,
+        "hash": method_hash(stable),
+    }
+
+
+def method_hash(snapshot: dict[str, object]) -> str:
+    stable = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"created_at", "updated_at", "hash"}
+    }
+    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:12]
+
+
+def parse_run_method_snapshot(
+    body: dict[str, object],
+    steps: list[TestStep],
+) -> dict[str, object]:
+    raw_snapshot = body.get("method_snapshot")
+    raw = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+    raw_id = str(raw.get("id") or body.get("method_id") or "").strip()
+    method_id = parse_method_id(raw_id) if raw_id else ""
+    name = parse_method_name(raw.get("name") or body.get("method_name") or "Unsaved Method")
+    snapshot = {
+        "schema_version": 1,
+        "id": method_id,
+        "name": name,
+        "steps": [asdict(step) for step in steps],
+        "motion": parse_method_motion(raw.get("motion")),
+    }
+    snapshot["hash"] = method_hash(snapshot)
+    return snapshot
+
+
+def freeze_method_snapshot(
+    method_snapshot: dict[str, object] | None,
+    steps: list[TestStep],
+) -> dict[str, object]:
+    if method_snapshot:
+        return parse_run_method_snapshot({"method_snapshot": method_snapshot}, steps)
+    return parse_run_method_snapshot({}, steps)
 
 
 def parse_test_steps(body: dict[str, object]) -> list[TestStep]:

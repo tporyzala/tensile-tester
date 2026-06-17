@@ -271,11 +271,11 @@ An automated test has any number of steps. Each step contains:
 
 Target and rate types are independent. For example, a step can move at `0.02 mm/s` until it reaches `100 N`, or increase the commanded force at `10 N/s` until it reaches `2.0 mm` displacement. Signed target values allow tension/compression or either crosshead direction; rate values are entered as positive magnitudes.
 
-The step table remains editable between samples. There is no method lock in the current codebase.
+The step table and motion settings can be saved as named test methods. The save icon opens a name prompt; saving with the same sanitized name overwrites that method, while saving with a new name creates a new method. The load icon opens a scrollable method picker. Loaded methods remain editable before running, and can be saved back to the same method or saved under a new name. Method files are JSON documents stored in `data/test-methods` by default; set `TENSILE_METHOD_DIR` to use another directory.
 
 Each sample has a sample ID and optional notes. The default sample ID increments as `Sample 1`, `Sample 2`, and so on. Sample IDs are limited to 64 characters and notes are limited to 200 characters.
 
-Completed samples are included by default. Stopped or faulted samples are retained in the sample set but excluded from overlays until the operator includes them. The sample table shows index, ID, status, point count, peak force, final displacement, include/exclude state, and notes.
+Completed samples are included by default. Stopped or faulted samples are retained in the sample set but excluded from overlays until the operator includes them. The sample table shows index, ID, status, method, point count, peak force, final displacement, include/exclude state, and notes.
 
 The Tare button posts to `/api/tare`. The Python app sends `ZERO_LOAD`, waits for `ACK,ZERO_LOAD`, then the Arduino treats the average of all fresh load-cell readings collected over 5 seconds as the new zero point. Tare collection is non-blocking, so serial handling, button reads, and stepper updates continue while tare is in progress.
 
@@ -285,7 +285,7 @@ The automated-test page has fixed `+100`, `+10`, `+1`, `-1`, `-10`, and `-100 mm
 
 The live charts are rendered with the vendored Plotly basic bundle. The Python app retains every received periodic telemetry point for the live plot buffer until the operator clicks Clear, while the browser incrementally renders only the most recent 5,000 live points. The force-displacement chart can overlay finalized included samples; overlay display traces are uniformly reduced to at most 2,000 points per sample and drawn without markers. Chart rendering pauses while the Automated Test tab or browser tab is hidden. The workbook export keeps full retained specimen telemetry.
 
-The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the sample ID, with Excel-invalid worksheet characters replaced and duplicate names made unique.
+The Set XLSX link downloads one workbook from `/api/test/samples/csv`. The route name is historical; the response is an `.xlsx` file named `tensile-sample-set.xlsx`. Each sample gets its own worksheet named from the sample ID, with Excel-invalid worksheet characters replaced and duplicate names made unique. The workbook includes the method ID, method name, method hash, and full method snapshot used when that sample started.
 
 The Clear Set button clears all in-memory sample records, active sample metadata, current test steps, and retained test telemetry. It is rejected while a specimen test, return-to-zero move, relative move, or faulted run is active.
 

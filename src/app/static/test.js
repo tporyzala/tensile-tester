@@ -3,6 +3,10 @@ const $ = (id) => document.getElementById(id);
 let steps = [
   { target_type: "FORCE", target_value: 100, rate_type: "FORCE", rate_value_per_s: 10, hold_duration_s: 5 },
 ];
+let currentMethod = null;
+let methodDirty = false;
+let methodList = [];
+let selectedMethodId = "";
 let serialAutoScroll = true;
 let commandInFlight = false;
 let tareInFlight = false;
@@ -75,6 +79,16 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function methodIdFromName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/g, "") || "method";
+}
+
 function setMessage(text) {
   $("message").textContent = text || "";
 }
@@ -111,6 +125,76 @@ function switchTab(tabName) {
 
 function syncLiveChartVisibility() {
   liveCharts.setVisible(!document.hidden && !$("run-panel").hidden);
+}
+
+function cloneStep(step) {
+  return {
+    target_type: step?.target_type === "DISPLACEMENT" ? "DISPLACEMENT" : "FORCE",
+    target_value: Number(step?.target_value) || 0,
+    rate_type: step?.rate_type === "DISPLACEMENT" ? "DISPLACEMENT" : "FORCE",
+    rate_value_per_s: Number(step?.rate_value_per_s) || 0,
+    hold_duration_s: Number(step?.hold_duration_s) || 0,
+  };
+}
+
+function cloneSteps(source) {
+  return Array.isArray(source) && source.length > 0
+    ? source.map(cloneStep)
+    : [{ target_type: "FORCE", target_value: 100, rate_type: "FORCE", rate_value_per_s: 10, hold_duration_s: 5 }];
+}
+
+function currentMotionSnapshot() {
+  return {
+    jog_speed_steps_s: Number($("jog-speed-slider").value),
+    test_max_step_rate_steps_s: Number($("test-speed-slider").value),
+    acceleration_steps_s2: Number($("acceleration-slider").value),
+  };
+}
+
+function currentMethodSnapshot(nameOverride = "") {
+  readStepsFromTable();
+  const name = nameOverride || currentMethod?.name || "Unsaved Method";
+  return {
+    schema_version: 1,
+    id: nameOverride ? methodIdFromName(nameOverride) : currentMethod?.id || "",
+    name,
+    steps: cloneSteps(steps),
+    motion: currentMotionSnapshot(),
+  };
+}
+
+function renderMethodState() {
+  $("method-name").textContent = currentMethod?.name || "Unsaved Method";
+  $("method-dirty").hidden = !methodDirty;
+}
+
+function setMethodDirty(dirty = true) {
+  methodDirty = dirty;
+  renderMethodState();
+}
+
+function applyMethod(method) {
+  currentMethod = {
+    id: method.id || "",
+    name: method.name || "Unsaved Method",
+  };
+  steps = cloneSteps(method.steps);
+  const motion = method.motion || {};
+  if (Number.isFinite(Number(motion.jog_speed_steps_s))) {
+    $("jog-speed-slider").value = String(motion.jog_speed_steps_s);
+  }
+  if (Number.isFinite(Number(motion.test_max_step_rate_steps_s))) {
+    $("test-speed-slider").value = String(motion.test_max_step_rate_steps_s);
+  }
+  if (Number.isFinite(Number(motion.acceleration_steps_s2))) {
+    $("acceleration-slider").value = String(motion.acceleration_steps_s2);
+  }
+  updateMotionLabels();
+  renderSteps();
+  setMethodDirty(false);
+  if (lastConnected) {
+    sendMotionUpdate();
+  }
 }
 
 function renderSteps() {
@@ -157,6 +241,7 @@ function addStep() {
   };
   steps.push({ ...last });
   renderSteps();
+  setMethodDirty();
 }
 
 function removeStep(index) {
@@ -167,6 +252,7 @@ function removeStep(index) {
   }
   steps.splice(index, 1);
   renderSteps();
+  setMethodDirty();
 }
 
 function updateSerialLog(rawSerialLines) {
@@ -303,6 +389,7 @@ function beginMotionEdit() {
 function scheduleMotionUpdate() {
   motionLocalUntil = Date.now() + 2000;
   updateMotionLabels();
+  setMethodDirty();
 }
 
 function finishMotionEdit() {
@@ -318,8 +405,12 @@ async function sendMotionUpdate() {
     acceleration_steps_s2: Number($("acceleration-slider").value),
   };
   const serialized = JSON.stringify(payload);
-  if (serialized === lastMotionSent || motionInFlight) {
-    return;
+  if (serialized === lastMotionSent) {
+    return true;
+  }
+  if (motionInFlight) {
+    setMessage("Wait for motion settings to finish.");
+    return false;
   }
 
   lastMotionSent = serialized;
@@ -335,13 +426,15 @@ async function sendMotionUpdate() {
     if (!response.ok) {
       lastMotionSent = "";
       setMessage(data.detail || `HTTP ${response.status}`);
-      return;
+      return false;
     }
     setMessage(data.last_message || "Motion settings applied.");
     await refresh();
+    return true;
   } catch (error) {
     lastMotionSent = "";
     setMessage(`Motion setting error: ${error}`);
+    return false;
   } finally {
     motionInFlight = false;
     updateButtons(lastStatus);
@@ -417,7 +510,7 @@ function renderSampleTable(samples) {
   if (samples.length === 0) {
     body.innerHTML = `
       <tr>
-        <td class="empty-table-cell" colspan="8">No samples recorded</td>
+        <td class="empty-table-cell" colspan="9">No samples recorded</td>
       </tr>
     `;
     return;
@@ -427,6 +520,7 @@ function renderSampleTable(samples) {
       <td>${sample.index}</td>
       <td>${escapeHtml(sample.sample_id)}</td>
       <td>${escapeHtml(sample.status)}</td>
+      <td>${escapeHtml(sample.method_name || "--")}</td>
       <td>${sample.point_count || 0}</td>
       <td>${optionalNumber(sample.peak_force_n, 2, " N")}</td>
       <td>${optionalNumber(sample.final_position_mm, 3, " mm")}</td>
@@ -440,7 +534,7 @@ function renderSampleTable(samples) {
 
 function buildSampleSetSignature(samples) {
   return samples
-    .map((sample) => `${sample.index}:${sample.included}:${sample.status}:${sample.point_count}`)
+    .map((sample) => `${sample.index}:${sample.included}:${sample.status}:${sample.point_count}:${sample.method_hash || ""}`)
     .join("|");
 }
 
@@ -1024,12 +1118,145 @@ async function postJson(url, body = {}) {
   }
 }
 
+async function refreshMethodList() {
+  const { response, data } = await requestJson("/api/test/methods", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(data.detail || `HTTP ${response.status}`);
+  }
+  methodList = Array.isArray(data.methods) ? data.methods : [];
+  return methodList;
+}
+
+function methodUpdatedLabel(method) {
+  if (!method.updated_at) {
+    return "not saved yet";
+  }
+  const parsed = new Date(method.updated_at);
+  return Number.isNaN(parsed.getTime()) ? method.updated_at : parsed.toLocaleString();
+}
+
+function updateSaveMethodMessage() {
+  const name = $("save-method-name").value.trim();
+  const message = $("save-method-message");
+  const nextId = methodIdFromName(name);
+  const existing = methodList.find(
+    (method) => method.id === nextId,
+  );
+  if (existing && existing.id !== currentMethod?.id) {
+    message.textContent = `Saving will overwrite "${existing.name}".`;
+  } else {
+    message.textContent = "";
+  }
+}
+
+async function openSaveMethodDialog() {
+  readStepsFromTable();
+  try {
+    await refreshMethodList();
+  } catch (_) {
+    methodList = [];
+  }
+  $("save-method-name").value = currentMethod?.name || "";
+  updateSaveMethodMessage();
+  $("save-method-dialog").showModal();
+  $("save-method-name").focus();
+}
+
+async function saveMethodFromDialog() {
+  const name = $("save-method-name").value.trim();
+  if (!name) {
+    $("save-method-message").textContent = "Enter a method name.";
+    return;
+  }
+  const payload = currentMethodSnapshot(name);
+  try {
+    const { response, data } = await requestJson("/api/test/methods", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      $("save-method-message").textContent = data.detail || `HTTP ${response.status}`;
+      return;
+    }
+    currentMethod = { id: data.id || "", name: data.name || name };
+    setMethodDirty(false);
+    await refreshMethodList();
+    $("save-method-dialog").close();
+    setMessage(`Saved method "${currentMethod.name}".`);
+  } catch (error) {
+    $("save-method-message").textContent = `Save failed: ${error}`;
+  }
+}
+
+function renderMethodList() {
+  const list = $("method-list");
+  if (methodList.length === 0) {
+    list.innerHTML = `<div class="method-list-empty">No saved methods</div>`;
+    $("confirm-load-method-button").disabled = true;
+    return;
+  }
+  list.innerHTML = methodList.map((method) => `
+    <button class="method-list-item ${method.id === selectedMethodId ? "selected" : ""}" data-method-id="${escapeHtml(method.id)}" type="button" role="option" aria-selected="${method.id === selectedMethodId ? "true" : "false"}">
+      <strong>${escapeHtml(method.name)}</strong>
+      <span class="method-list-meta">${method.step_count || 0} steps, updated ${escapeHtml(methodUpdatedLabel(method))}</span>
+    </button>
+  `).join("");
+  $("confirm-load-method-button").disabled = !selectedMethodId;
+}
+
+async function openLoadMethodDialog() {
+  selectedMethodId = "";
+  const warning = $("load-method-warning");
+  warning.hidden = !methodDirty;
+  warning.textContent = methodDirty
+    ? "Loading a method will replace the unsaved method currently on screen."
+    : "";
+  $("method-list").innerHTML = `<div class="method-list-empty">Loading methods...</div>`;
+  $("confirm-load-method-button").disabled = true;
+  $("load-method-dialog").showModal();
+  try {
+    await refreshMethodList();
+    renderMethodList();
+  } catch (error) {
+    $("method-list").innerHTML = `<div class="method-list-empty">Could not load methods: ${escapeHtml(error)}</div>`;
+  }
+}
+
+async function loadSelectedMethod() {
+  if (!selectedMethodId) {
+    return;
+  }
+  try {
+    const { response, data } = await requestJson(
+      `/api/test/methods/${encodeURIComponent(selectedMethodId)}`,
+      { cache: "no-store" },
+    );
+    if (!response.ok) {
+      $("load-method-warning").hidden = false;
+      $("load-method-warning").textContent = data.detail || `HTTP ${response.status}`;
+      return;
+    }
+    applyMethod(data);
+    $("load-method-dialog").close();
+    setMessage(`Loaded method "${data.name}".`);
+  } catch (error) {
+    $("load-method-warning").hidden = false;
+    $("load-method-warning").textContent = `Load failed: ${error}`;
+  }
+}
+
 async function startTest() {
   readStepsFromTable();
   const sampleId = $("sample-id").value.trim();
   lastSubmittedSampleId = sampleId;
+  const motionUpdated = await sendMotionUpdate();
+  if (!motionUpdated) {
+    return;
+  }
   await postJson("/api/test/start", {
     steps,
+    method_snapshot: currentMethodSnapshot(),
     sample: {
       id: sampleId,
       notes: $("sample-notes").value.trim(),
@@ -1144,6 +1371,7 @@ $("step-body").addEventListener("input", (event) => {
   steps[index][input.dataset.field] = input.dataset.field.endsWith("_type")
     ? input.value
     : Number(input.value);
+  setMethodDirty();
 });
 
 $("step-body").addEventListener("click", (event) => {
@@ -1179,6 +1407,21 @@ $("overlay-toggle").addEventListener("change", () => {
 });
 
 $("return-zero-mode").addEventListener("change", updateReturnZeroRateControl);
+$("load-method-button").addEventListener("click", openLoadMethodDialog);
+$("save-method-button").addEventListener("click", openSaveMethodDialog);
+$("save-method-name").addEventListener("input", updateSaveMethodMessage);
+$("cancel-save-method-button").addEventListener("click", () => $("save-method-dialog").close());
+$("confirm-save-method-button").addEventListener("click", saveMethodFromDialog);
+$("cancel-load-method-button").addEventListener("click", () => $("load-method-dialog").close());
+$("confirm-load-method-button").addEventListener("click", loadSelectedMethod);
+$("method-list").addEventListener("click", (event) => {
+  const item = event.target.closest(".method-list-item");
+  if (!item) {
+    return;
+  }
+  selectedMethodId = item.dataset.methodId || "";
+  renderMethodList();
+});
 $("add-step-button").addEventListener("click", addStep);
 $("start-button").addEventListener("click", startTest);
 $("return-zero-button").addEventListener("click", returnToZero);
@@ -1229,6 +1472,7 @@ for (const button of document.querySelectorAll(".tab-button")) {
 document.addEventListener("visibilitychange", syncLiveChartVisibility);
 
 renderSteps();
+renderMethodState();
 renderCalibrationPoints();
 updateMotionLabels();
 updateReturnZeroRateControl();
