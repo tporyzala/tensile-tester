@@ -296,6 +296,7 @@ class MultiSampleTests(unittest.TestCase):
             shared_strings = archive.read("xl/sharedStrings.xml").decode("utf-8")
             summary_xml = workbook_sheet_xml(archive, "Summary")
             method_xml = workbook_sheet_xml(archive, "Method")
+            plots_xml = workbook_sheet_xml(archive, "Plots")
             worksheet_xml = workbook_sheet_xml(archive, "A-1")
             chart_files = [
                 name
@@ -324,11 +325,23 @@ class MultiSampleTests(unittest.TestCase):
         self.assertEqual(worksheet_number(summary_cells, "C6"), -5.0)
         self.assertEqual(worksheet_number(summary_cells, "B7"), 1.0)
         self.assertEqual(worksheet_number(summary_cells, "C7"), 0.6)
+        self.assertEqual(worksheet_number(summary_cells, "Z12"), 99.0)
+        self.assertEqual(worksheet_number(summary_cells, "Z13"), 75.0)
+        self.assertEqual(worksheet_number(summary_cells, "Z14"), 55.0)
+        self.assertEqual(worksheet_number(summary_cells, "AA14"), 5.0)
         for cell_ref in ["A11", "G11", "H11", "I11", "J11", "K11"]:
             with self.subTest(cell_ref=cell_ref):
                 self.assertNotEqual(summary_cells[cell_ref].attrib.get("t"), "s")
                 self.assertIsNotNone(
                     summary_cells[cell_ref].find("sheet:v", WORKBOOK_NAMESPACE))
+
+        plots_cells = worksheet_cells(plots_xml)
+        self.assertEqual(worksheet_number(plots_cells, "C5"), 9.9)
+        self.assertEqual(worksheet_number(plots_cells, "D5"), 99.0)
+        self.assertEqual(worksheet_number(plots_cells, "E5"), 7.5)
+        self.assertEqual(worksheet_number(plots_cells, "F5"), 75.0)
+        self.assertEqual(worksheet_number(plots_cells, "G5"), 5.5)
+        self.assertEqual(worksheet_number(plots_cells, "H5"), 55.0)
 
         cells = worksheet_cells(worksheet_xml)
         for cell_ref in ["A12", "B12", "C12", "E12", "I12", "J12", "K12", "L12", "M12"]:

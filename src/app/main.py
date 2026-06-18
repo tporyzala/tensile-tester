@@ -3078,7 +3078,7 @@ def write_summary_worksheet(
             len(SUMMARY_WORKBOOK_FIELDNAMES) - 1,
         )
 
-    chart_records = included_complete_records(records)
+    chart_records = sample_chart_records(records)
     chart_header_row = table_header_row
     chart_data_row = data_start_row
     chart_columns = (24, 25, 26)
@@ -3135,7 +3135,7 @@ def write_summary_worksheet(
         displacement_chart.set_legend({"none": True})
         worksheet.insert_chart(17, 12, displacement_chart, {"x_scale": 1.15, "y_scale": 1.0})
     else:
-        worksheet.write(1, 12, "No included complete samples to chart.", formats["text"])
+        worksheet.write(1, 12, "No samples to chart.", formats["text"])
 
     worksheet.freeze_panes(data_start_row, 0)
     worksheet.set_column(0, 0, 12)
@@ -3326,7 +3326,7 @@ def write_plots_worksheet(
     worksheet.write(
         1,
         0,
-        f"Charts use up to {WORKBOOK_FORCE_DISPLACEMENT_MAX_POINTS:,} points per included complete sample.",
+        f"Charts use up to {WORKBOOK_FORCE_DISPLACEMENT_MAX_POINTS:,} points per sample.",
         formats["text"],
     )
 
@@ -3334,8 +3334,6 @@ def write_plots_worksheet(
     series_count = 0
     column_index = 0
     for record in records:
-        if not record.included or record.status != "COMPLETE":
-            continue
         points = workbook_force_displacement_points(record.samples)
         sampled_points = sampled_workbook_points(
             points,
@@ -3371,7 +3369,7 @@ def write_plots_worksheet(
         })
         worksheet.freeze_panes(4, 0)
     else:
-        worksheet.write(3, 0, "No included complete samples to plot.", formats["text"])
+        worksheet.write(3, 0, "No sample telemetry to plot.", formats["text"])
         worksheet.set_column(0, 0, 34)
 
 
@@ -3409,6 +3407,17 @@ def included_complete_records(records: list[TestSampleRecord]) -> list[TestSampl
         record
         for record in records
         if record.included and record.status == "COMPLETE"
+    ]
+
+
+def sample_chart_records(records: list[TestSampleRecord]) -> list[TestSampleRecord]:
+    return [
+        record
+        for record in records
+        if all(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in (record.peak_force_n, record.final_position_mm)
+        )
     ]
 
 
