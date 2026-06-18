@@ -261,9 +261,9 @@ function applyMethod(method) {
 
 function renderSteps() {
   const body = $("step-body");
-  body.innerHTML = steps.map((step, index) => `
+  const stepRows = steps.map((step, index) => `
     <tr>
-      <td>${index + 1}</td>
+      <td class="step-index-cell">${index + 1}</td>
       <td>
         <select class="table-input" data-index="${index}" data-field="target_type">
           <option value="FORCE" ${step.target_type === "FORCE" ? "selected" : ""}>Force (N)</option>
@@ -279,9 +279,33 @@ function renderSteps() {
       </td>
       <td><input class="table-input" data-index="${index}" data-field="rate_value_per_s" type="number" min="0.0001" step="0.001" value="${step.rate_value_per_s}"></td>
       <td><input class="table-input" data-index="${index}" data-field="hold_duration_s" type="number" min="0" step="0.1" value="${step.hold_duration_s}"></td>
-      <td><button class="mini-button danger" data-action="remove" data-index="${index}" type="button">Delete</button></td>
+      <td class="step-action-cell">
+        <button class="icon-button danger" data-action="remove" data-index="${index}" type="button" title="Delete step ${index + 1}" aria-label="Delete step ${index + 1}">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16"></path>
+            <path d="M10 11v6"></path>
+            <path d="M14 11v6"></path>
+            <path d="M6 7l1 13h10l1-13"></path>
+            <path d="M9 7V4h6v3"></path>
+          </svg>
+        </button>
+      </td>
     </tr>
   `).join("");
+  body.innerHTML = `${stepRows}
+    <tr class="step-add-row">
+      <td></td>
+      <td colspan="6" class="step-add-cell">
+        <button id="add-step-button" class="action-button primary button-with-icon add-step-inline-button" data-action="add" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14"></path>
+            <path d="M5 12h14"></path>
+          </svg>
+          <span>Add Step</span>
+        </button>
+      </td>
+    </tr>
+  `;
 }
 
 function readStepsFromTable() {
@@ -373,7 +397,10 @@ function updateButtons(status) {
   $("pause-button").disabled = commandInFlight || !["RUNNING", "PAUSED", "WAITING_NEXT"].includes(status);
   $("pause-button").textContent = status === "PAUSED" ? "Resume" : "Pause";
   $("stop-button").disabled = commandInFlight || !(active || status === "FAULT");
-  $("add-step-button").disabled = setupBusy;
+  const addStepButton = $("add-step-button");
+  if (addStepButton) {
+    addStepButton.disabled = setupBusy;
+  }
   $("clear-samples-button").disabled = setupBusy || blocked || samples.length === 0;
   $("save-sample-set-button").disabled = setupBusy || blocked || samples.length === 0;
   $("open-sample-set-button").disabled = setupBusy || blocked;
@@ -1677,6 +1704,10 @@ $("step-body").addEventListener("click", (event) => {
   }
   const index = Number(button.dataset.index);
   const action = button.dataset.action;
+  if (action === "add") {
+    addStep();
+    return;
+  }
   if (action === "remove") {
     removeStep(index);
   }
@@ -1755,7 +1786,6 @@ $("sample-set-list").addEventListener("click", (event) => {
   selectedSampleSetId = item.dataset.sampleSetId || "";
   renderSampleSetList();
 });
-$("add-step-button").addEventListener("click", addStep);
 $("start-button").addEventListener("click", startTest);
 $("return-zero-button").addEventListener("click", returnToZero);
 for (const button of document.querySelectorAll(".relative-move-button")) {

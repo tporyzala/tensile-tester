@@ -476,7 +476,7 @@ input[type="range"] {
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 
 .sample-set-panel .sample-run-controls {
@@ -668,6 +668,18 @@ input[type="range"] {
   cursor: pointer;
 }
 
+.button-with-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.compact-action {
+  min-height: 38px;
+  padding: 9px 12px;
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
@@ -677,7 +689,9 @@ input[type="range"] {
   padding: 0;
 }
 
-.icon-button svg {
+.icon-button svg,
+.action-button svg,
+.mini-button svg {
   width: 19px;
   height: 19px;
   fill: none;
@@ -700,6 +714,7 @@ input[type="range"] {
 }
 
 .action-button.danger,
+.icon-button.danger,
 .mini-button.danger {
   border-color: #b84138;
   background: #fff0ee;
@@ -758,6 +773,32 @@ input[type="range"] {
   color: #5d6870;
   font-size: 13px;
   text-transform: uppercase;
+}
+
+.step-index-cell {
+  width: 34px;
+  color: #1f4e66;
+  font-weight: 800;
+}
+
+.step-action-cell {
+  width: 52px;
+  text-align: center;
+}
+
+.step-add-row td {
+  padding-top: 12px;
+  padding-bottom: 4px;
+  border-bottom: 0;
+  background: #fbfcfc;
+}
+
+.step-add-cell {
+  padding-left: 8px;
+}
+
+.add-step-inline-button {
+  min-width: 132px;
 }
 
 .empty-table-cell {
