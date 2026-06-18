@@ -152,6 +152,22 @@ def worksheet_cells(worksheet_xml):
     }
 
 
+def worksheet_has_hidden_columns(worksheet_xml):
+    worksheet = ET.fromstring(worksheet_xml)
+    return any(
+        column.attrib.get("hidden") == "1"
+        for column in worksheet.findall(".//sheet:col", WORKBOOK_NAMESPACE)
+    )
+
+
+def worksheet_has_frozen_panes(worksheet_xml):
+    worksheet = ET.fromstring(worksheet_xml)
+    return any(
+        pane.attrib.get("state") == "frozen"
+        for pane in worksheet.findall(".//sheet:pane", WORKBOOK_NAMESPACE)
+    )
+
+
 def worksheet_number(cells, cell_ref):
     value = cells[cell_ref].find("sheet:v", WORKBOOK_NAMESPACE)
     if value is None:
@@ -319,6 +335,11 @@ class MultiSampleTests(unittest.TestCase):
         self.assertIn("unload_force_n", shared_strings)
         self.assertIn("-0.5", method_xml.decode("utf-8"))
         self.assertGreaterEqual(len(chart_files), 3)
+        self.assertFalse(worksheet_has_hidden_columns(summary_xml))
+        self.assertFalse(worksheet_has_hidden_columns(plots_xml))
+        self.assertFalse(worksheet_has_frozen_panes(summary_xml))
+        self.assertFalse(worksheet_has_frozen_panes(plots_xml))
+        self.assertFalse(worksheet_has_frozen_panes(worksheet_xml))
 
         summary_cells = worksheet_cells(summary_xml)
         self.assertEqual(worksheet_number(summary_cells, "B6"), 1.0)

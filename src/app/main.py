@@ -3104,7 +3104,7 @@ def write_summary_worksheet(
             record.final_position_mm,
             formats["number_5"],
         )
-    worksheet.set_column(chart_columns[0], chart_columns[-1], None, None, {"hidden": True})
+    worksheet.set_column(chart_columns[0], chart_columns[-1], 18)
 
     if chart_records:
         last_chart_row = chart_data_row + len(chart_records) - 1
@@ -3137,7 +3137,6 @@ def write_summary_worksheet(
     else:
         worksheet.write(1, 12, "No samples to chart.", formats["text"])
 
-    worksheet.freeze_panes(data_start_row, 0)
     worksheet.set_column(0, 0, 12)
     worksheet.set_column(1, 1, 16)
     worksheet.set_column(2, 2, 28)
@@ -3313,7 +3312,6 @@ def write_sample_worksheet(
 
     last_row = header_row + max(1, len(record.samples))
     worksheet.autofilter(header_row, 0, last_row, len(SAMPLE_WORKBOOK_FIELDNAMES) - 1)
-    worksheet.freeze_panes(header_row + 1, 0)
 
 
 def write_plots_worksheet(
@@ -3367,7 +3365,6 @@ def write_plots_worksheet(
             "x_scale": 1.45,
             "y_scale": 1.3,
         })
-        worksheet.freeze_panes(4, 0)
     else:
         worksheet.write(3, 0, "No sample telemetry to plot.", formats["text"])
         worksheet.set_column(0, 0, 34)
