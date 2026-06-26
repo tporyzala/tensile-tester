@@ -154,6 +154,10 @@ CALIBRATION_SAMPLE_MIN_COUNT = 20
 CALIBRATION_STATIONARY_STEP_RATE_MAX_STEPS_S = 0.5
 
 
+def sample_included_by_default(status: str) -> bool:
+    return status in {"COMPLETE", "STOPPED"}
+
+
 @dataclass(slots=True)
 class AppConfig:
     serial_port: str = os.getenv("TENSILE_SERIAL_PORT", DEFAULT_SERIAL_PORT)
@@ -1974,7 +1978,7 @@ class SerialMonitor:
             sample_id=self._active_sample.sample_id,
             notes=self._active_sample.notes,
             status=status,
-            included=status == "COMPLETE",
+            included=sample_included_by_default(status),
             started_at=self._test_state.started_at,
             finished_at=finished_at,
             point_count=point_count,
@@ -2796,7 +2800,7 @@ def parse_sample_record(raw_record: object, fallback_index: int) -> TestSampleRe
         notes=parse_sample_notes(raw_record.get("notes")),
         status=status,
         included=parse_boolean(
-            raw_record.get("included", status == "COMPLETE"),
+            raw_record.get("included", sample_included_by_default(status)),
             "Sample included",
         ),
         started_at=parse_finite_float(
@@ -3023,7 +3027,7 @@ def write_summary_worksheet(
         formats["text"],
     )
 
-    worksheet.write(3, 0, "Statistics (included complete samples)", formats["section"])
+    worksheet.write(3, 0, "Statistics (included samples)", formats["section"])
     stats_header = ["Metric", "Count", "Average", "Min", "Max", "Std Dev"]
     for column_index, heading in enumerate(stats_header):
         worksheet.write(4, column_index, heading, formats["header"])
@@ -3399,11 +3403,11 @@ def summary_workbook_row(record: TestSampleRecord) -> dict[str, object]:
     }
 
 
-def included_complete_records(records: list[TestSampleRecord]) -> list[TestSampleRecord]:
+def included_stat_records(records: list[TestSampleRecord]) -> list[TestSampleRecord]:
     return [
         record
         for record in records
-        if record.included and record.status == "COMPLETE"
+        if record.included
     ]
 
 
@@ -3424,7 +3428,7 @@ def workbook_stat_values(
 ) -> dict[str, float | int]:
     values = [
         value
-        for record in included_complete_records(records)
+        for record in included_stat_records(records)
         if isinstance((value := getattr(record, field)), (int, float))
         and math.isfinite(float(value))
     ]
